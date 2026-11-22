@@ -24,6 +24,10 @@ class CapCraftApplication : Application() {
                 // it before the library first reads them.
                 Os.setenv("TMPDIR", cacheDir.absolutePath, true)
                 Os.setenv("HOME", filesDir.absolutePath, true)
+                // The renderer's safe start (concat-render gpu.rs): on Android it draws on OpenGL ES
+                // instead of Vulkan. Some phones' Vulkan drivers crash at the first frame (the Redmi
+                // A3's PowerVR GE8320, vulkan.mt6765.so, in vkQueueSubmit).
+                Os.setenv("CONCAT_GPU", "software", true)
                 File(cacheDir, "exports").mkdirs()
                 init(filesDir.absolutePath, cacheDir.absolutePath)
                 NativeContext.start(this@CapCraftApplication)
