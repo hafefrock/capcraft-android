@@ -363,14 +363,27 @@ private fun rememberFrames(vm: EditorViewModel, width: Int, height: Int): ImageB
             val den = (vm.timeline?.fpsDen ?: 1L).coerceAtLeast(1L)
             fun frameAt(us: Long) = us * num / (den * 1_000_000L)
             fun timeOf(frame: Long) = (4 * frame + 1) * den * 1_000_000L / (4 * num)
+            var madeLogged = 0
             suspend fun make(frame: Long): Bitmap? {
+                val started = System.nanoTime()
                 val pic = withContext(Threads.preview) {
-                    runCatching { s.frame(timeOf(frame), width.toUInt(), height.toUInt(), Motion.PLAYING) }.getOrNull()
+                    runCatching { s.frame(timeOf(frame), width.toUInt(), height.toUInt(), Motion.PLAYING) }
+                        .onFailure { android.util.Log.w("CapCraft", "playing: frame $frame failed: $it") }
+                        .getOrNull()
                 } ?: return null
-                val b = pic.intoBitmap(buffers.take()) ?: return null
+                val b = pic.intoBitmap(buffers.take())
+                if (b == null) {
+                    android.util.Log.w("CapCraft", "playing: frame $frame came back without a bitmap")
+                    return null
+                }
+                if (madeLogged < 12) {
+                    madeLogged++
+                    android.util.Log.i("CapCraft", "playing: frame $frame made in %.0f ms at %dx%d".format((System.nanoTime() - started) / 1e6, width, height))
+                }
                 buffers.put(b)
                 return b
             }
+            android.util.Log.i("CapCraft", "playing: started at frame ${frameAt(vm.playhead)}, ${width}x$height")
             var shown = -1L
             var ready: Bitmap? = null
             var readyFrame = -1L
