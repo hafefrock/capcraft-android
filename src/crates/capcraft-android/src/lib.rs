@@ -135,7 +135,15 @@ pub fn init(files_dir: String, cache_dir: String) -> Result<(), MobileError> {
     // Video decodes on the phone's chip wherever it can: its cores fell
     // behind playing a camera's files, and a stream the chip refuses, or a
     // reader past the few it has room for, decodes in software anyway.
-    concat_media::set_hardware_decode(true);
+    // CONCAT_HWDEC=off decodes on the cores instead, for a phone whose MediaCodec road is slower
+    // than they are (the Redmi A3 made a 720p frame in 250 ms on it).
+    let hardware_decode = !std::env::var("CONCAT_HWDEC").is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "off" | "software" | "0"
+        )
+    });
+    concat_media::set_hardware_decode(hardware_decode);
     // Readers nobody has asked a frame of for ten seconds are closed, looked
     // at every five, as the desktop editor does: each holds buffers, one on
     // the chip holds one of its few decoders, and the playhead leaves files
