@@ -368,8 +368,12 @@ private fun rememberFrames(vm: EditorViewModel, width: Int, height: Int): ImageB
                 val started = System.nanoTime()
                 var entered = started
                 var engineDone = started
+                var lockWait = 0L
                 val pic = withContext(Threads.preview) {
                     entered = System.nanoTime()
+                    // a call that only takes the session's lock: how long the lock was held by someone else
+                    runCatching { s.path() }
+                    lockWait = System.nanoTime() - entered
                     runCatching { s.frame(timeOf(frame), width.toUInt(), height.toUInt(), Motion.PLAYING) }
                         .onFailure { android.util.Log.w("CapCraft", "playing: frame $frame failed: $it") }
                         .getOrNull()
@@ -388,9 +392,10 @@ private fun rememberFrames(vm: EditorViewModel, width: Int, height: Int): ImageB
                     // hands back), getting back on the main thread, and copying the pixels into the bitmap
                     android.util.Log.i(
                         "CapCraft",
-                        "playing: frame $frame made in %.0f ms (queue %.0f, engine %.0f, back on main %.0f, bitmap %.0f) at %dx%d".format(
+                        "playing: frame $frame made in %.0f ms (queue %.0f, lock probe %.0f, engine %.0f, back on main %.0f, bitmap %.0f) at %dx%d".format(
                             (end - started) / 1e6,
                             (entered - started) / 1e6,
+                            lockWait / 1e6,
                             (engineDone - entered) / 1e6,
                             (backOnMain - engineDone) / 1e6,
                             (end - backOnMain) / 1e6,
