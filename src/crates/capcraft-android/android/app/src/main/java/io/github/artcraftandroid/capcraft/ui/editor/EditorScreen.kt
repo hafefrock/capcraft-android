@@ -85,6 +85,16 @@ fun EditorScreen(path: String, incoming: List<Uri>, then: String? = null, close:
     val scope = rememberCoroutineScope()
     var exporting by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { vm.open(incoming, then) }
+    // The sound is handed to the player again a moment after the project opens, with nothing edited: the
+    // editor left before can clear the player after this one has loaded it, and a project opened again was
+    // silent (video and added sound alike) until an edit loaded it once more.
+    val openSession = vm.session
+    LaunchedEffect(openSession) {
+        val s = openSession ?: return@LaunchedEffect
+        delay(1200)
+        withContext(Threads.commands) { runCatching { s.applyBatch("[]") } }
+        android.util.Log.i("CapCraft", "sound: handed to the player again after opening")
+    }
     // the picker marks what this project holds already
     androidx.compose.runtime.DisposableEffect(path) {
         io.github.artcraftandroid.capcraft.ui.common.MediaPick.project = path
@@ -272,11 +282,12 @@ fun Preview(vm: EditorViewModel, modifier: Modifier) {
         val boxH = with(density) { maxHeight.toPx() }
         val aspect = t.width.toFloat() / t.height.toFloat().coerceAtLeast(1f)
         val (shownW, shownH) = if (boxW / boxH > aspect) (boxH * aspect) to boxH else boxW to (boxW / aspect)
-        // the frame the engine draws: the shown size, at most 480 on its short side at rest and 180 while
-        // playing (it was 1080). On a low-end phone's GPU drawing and reading a frame back costs about 0.7
-        // microseconds a pixel - 200 ms at 720x404, which caps playback near 5 frames a second - and the
-        // picture is stretched to the preview's size anyway. An export is unaffected.
-        val shortSide = if (vm.playing) 180f else 480f
+        // the frame the engine draws: the shown size, at most 720 on its short side at rest and 180 while
+        // playing (it was 1080). On a low-end phone's GPU drawing and reading a frame back costs about 0.5
+        // microseconds a pixel - 200 ms at 720x404, which caps playback near 5 frames a second - so a
+        // moving picture is drawn small and stretched, and the one frame of a rest can afford the full
+        // size. An export is unaffected.
+        val shortSide = if (vm.playing) 180f else 720f
         val cap = min(1f, shortSide / min(shownW, shownH).coerceAtLeast(1f))
         val frameW = ((shownW * cap).roundToInt() / 2 * 2).coerceAtLeast(2)
         val frameH = ((shownH * cap).roundToInt() / 2 * 2).coerceAtLeast(2)
@@ -438,8 +449,12 @@ private fun rememberFrames(vm: EditorViewModel, width: Int, height: Int): ImageB
         } else {
             suspend fun show(at: Long, motion: Motion) {
                 val started = System.nanoTime()
+                // a drag of the playhead makes a frame every few tenths of a second: drawn at two thirds of
+                // the rest size, so it stays as light as it was at 480
+                val w = if (motion == Motion.SCRUBBING) (width * 2 / 3 / 2 * 2).coerceAtLeast(2) else width
+                val h = if (motion == Motion.SCRUBBING) (height * 2 / 3 / 2 * 2).coerceAtLeast(2) else height
                 val pic = withContext(Threads.preview) {
-                    runCatching { s.frame(at, width.toUInt(), height.toUInt(), motion) }.getOrNull()
+                    runCatching { s.frame(at, w.toUInt(), h.toUInt(), motion) }.getOrNull()
                 } ?: return
                 if (motion == Motion.SCRUBBING) meter.add(started)
                 val b = pic.intoBitmap(buffers.take()) ?: return
