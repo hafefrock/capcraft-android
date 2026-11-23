@@ -272,8 +272,10 @@ fun Preview(vm: EditorViewModel, modifier: Modifier) {
         val boxH = with(density) { maxHeight.toPx() }
         val aspect = t.width.toFloat() / t.height.toFloat().coerceAtLeast(1f)
         val (shownW, shownH) = if (boxW / boxH > aspect) (boxH * aspect) to boxH else boxW to (boxW / aspect)
-        // the frame the engine draws: the shown size, at most 1080 on its short side
-        val cap = min(1f, 1080f / min(shownW, shownH).coerceAtLeast(1f))
+        // the frame the engine draws: the shown size, at most 480 on its short side (it was 1080: a
+        // low-end phone's GPU cannot draw that in time to play, and the picture is stretched to the
+        // preview's size anyway; an export is unaffected)
+        val cap = min(1f, 480f / min(shownW, shownH).coerceAtLeast(1f))
         val frameW = ((shownW * cap).roundToInt() / 2 * 2).coerceAtLeast(2)
         val frameH = ((shownH * cap).roundToInt() / 2 * 2).coerceAtLeast(2)
         val image = rememberFrames(vm, frameW, frameH)
