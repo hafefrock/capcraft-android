@@ -272,10 +272,12 @@ fun Preview(vm: EditorViewModel, modifier: Modifier) {
         val boxH = with(density) { maxHeight.toPx() }
         val aspect = t.width.toFloat() / t.height.toFloat().coerceAtLeast(1f)
         val (shownW, shownH) = if (boxW / boxH > aspect) (boxH * aspect) to boxH else boxW to (boxW / aspect)
-        // the frame the engine draws: the shown size, at most 480 on its short side (it was 1080: a
-        // low-end phone's GPU cannot draw that in time to play, and the picture is stretched to the
-        // preview's size anyway; an export is unaffected)
-        val cap = min(1f, 480f / min(shownW, shownH).coerceAtLeast(1f))
+        // the frame the engine draws: the shown size, at most 480 on its short side at rest and 240 while
+        // playing (it was 1080). On a low-end phone's GPU drawing and reading a frame back costs about 0.7
+        // microseconds a pixel - 200 ms at 720x404, which caps playback near 5 frames a second - and the
+        // picture is stretched to the preview's size anyway. An export is unaffected.
+        val shortSide = if (vm.playing) 240f else 480f
+        val cap = min(1f, shortSide / min(shownW, shownH).coerceAtLeast(1f))
         val frameW = ((shownW * cap).roundToInt() / 2 * 2).coerceAtLeast(2)
         val frameH = ((shownH * cap).roundToInt() / 2 * 2).coerceAtLeast(2)
         val image = rememberFrames(vm, frameW, frameH)
@@ -368,12 +370,8 @@ private fun rememberFrames(vm: EditorViewModel, width: Int, height: Int): ImageB
                 val started = System.nanoTime()
                 var entered = started
                 var engineDone = started
-                var lockWait = 0L
                 val pic = withContext(Threads.preview) {
                     entered = System.nanoTime()
-                    // a call that only takes the session's lock: how long the lock was held by someone else
-                    runCatching { s.path() }
-                    lockWait = System.nanoTime() - entered
                     runCatching { s.frame(timeOf(frame), width.toUInt(), height.toUInt(), Motion.PLAYING) }
                         .onFailure { android.util.Log.w("CapCraft", "playing: frame $frame failed: $it") }
                         .getOrNull()
@@ -392,10 +390,9 @@ private fun rememberFrames(vm: EditorViewModel, width: Int, height: Int): ImageB
                     // hands back), getting back on the main thread, and copying the pixels into the bitmap
                     android.util.Log.i(
                         "CapCraft",
-                        "playing: frame $frame made in %.0f ms (queue %.0f, lock probe %.0f, engine %.0f, back on main %.0f, bitmap %.0f) at %dx%d".format(
+                        "playing: frame $frame made in %.0f ms (queue %.0f, engine %.0f, back on main %.0f, bitmap %.0f) at %dx%d".format(
                             (end - started) / 1e6,
                             (entered - started) / 1e6,
-                            lockWait / 1e6,
                             (engineDone - entered) / 1e6,
                             (backOnMain - engineDone) / 1e6,
                             (end - backOnMain) / 1e6,
