@@ -326,7 +326,7 @@ impl Monitor {
         // on the GPU and reading it back.
         let total = started.elapsed();
         if total > std::time::Duration::from_millis(60) {
-            log::debug!(
+            log::info!(
                 "preview frame at {:.2}s ({}x{}, moving {}): sources {:?}, draw and read back {:?}",
                 spec.time,
                 spec.width,
