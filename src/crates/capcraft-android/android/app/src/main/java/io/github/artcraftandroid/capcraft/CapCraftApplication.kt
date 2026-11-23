@@ -31,6 +31,8 @@ class CapCraftApplication : Application() {
                 // The engine's log at debug level (frame times, decoder choices), to see why the preview
                 // does not play on a slow phone. Remove once it does.
                 Os.setenv("CONCAT_LOG", "debug", true)
+                // Decode on the CPU, not on MediaCodec (see lib.rs): a test of which one is faster here.
+                Os.setenv("CONCAT_HWDEC", "off", true)
                 File(cacheDir, "exports").mkdirs()
                 init(filesDir.absolutePath, cacheDir.absolutePath)
                 NativeContext.start(this@CapCraftApplication)
