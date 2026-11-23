@@ -366,11 +366,16 @@ private fun rememberFrames(vm: EditorViewModel, width: Int, height: Int): ImageB
             var madeLogged = 0
             suspend fun make(frame: Long): Bitmap? {
                 val started = System.nanoTime()
+                var entered = started
+                var engineDone = started
                 val pic = withContext(Threads.preview) {
+                    entered = System.nanoTime()
                     runCatching { s.frame(timeOf(frame), width.toUInt(), height.toUInt(), Motion.PLAYING) }
                         .onFailure { android.util.Log.w("CapCraft", "playing: frame $frame failed: $it") }
                         .getOrNull()
+                        .also { engineDone = System.nanoTime() }
                 } ?: return null
+                val backOnMain = System.nanoTime()
                 val b = pic.intoBitmap(buffers.take())
                 if (b == null) {
                     android.util.Log.w("CapCraft", "playing: frame $frame came back without a bitmap")
@@ -378,7 +383,21 @@ private fun rememberFrames(vm: EditorViewModel, width: Int, height: Int): ImageB
                 }
                 if (madeLogged < 12) {
                     madeLogged++
-                    android.util.Log.i("CapCraft", "playing: frame $frame made in %.0f ms at %dx%d".format((System.nanoTime() - started) / 1e6, width, height))
+                    val end = System.nanoTime()
+                    // where the time went: waiting for the preview thread, the engine call (Rust and what it
+                    // hands back), getting back on the main thread, and copying the pixels into the bitmap
+                    android.util.Log.i(
+                        "CapCraft",
+                        "playing: frame $frame made in %.0f ms (queue %.0f, engine %.0f, back on main %.0f, bitmap %.0f) at %dx%d".format(
+                            (end - started) / 1e6,
+                            (entered - started) / 1e6,
+                            (engineDone - entered) / 1e6,
+                            (backOnMain - engineDone) / 1e6,
+                            (end - backOnMain) / 1e6,
+                            width,
+                            height,
+                        ),
+                    )
                 }
                 buffers.put(b)
                 return b
