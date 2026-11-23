@@ -316,10 +316,27 @@ impl Monitor {
         settings: &DocumentSettings,
         spec: FrameSpec,
     ) -> Result<Vec<u8>, String> {
+        let started = std::time::Instant::now();
         let plan = self.plan_for(clips, settings, spec);
         let sources =
             concat_export::preview_sources_of(&self.pool, &plan, spec.time, spec.reading())?;
-        sources.pixels()
+        let sourced = started.elapsed();
+        let pixels = sources.pixels();
+        // Where a slow frame spent its time: reading and decoding the files, or drawing the frame
+        // on the GPU and reading it back.
+        let total = started.elapsed();
+        if total > std::time::Duration::from_millis(60) {
+            log::debug!(
+                "preview frame at {:.2}s ({}x{}, moving {}): sources {:?}, draw and read back {:?}",
+                spec.time,
+                spec.width,
+                spec.height,
+                spec.moving,
+                sourced,
+                total - sourced
+            );
+        }
+        pixels
     }
 
     /// Decode-ahead for the playback stream: hands the scheduler the next
