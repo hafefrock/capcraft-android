@@ -28,9 +28,6 @@ class CapCraftApplication : Application() {
                 // instead of Vulkan. Some phones' Vulkan drivers crash at the first frame (the Redmi
                 // A3's PowerVR GE8320, vulkan.mt6765.so, in vkQueueSubmit).
                 Os.setenv("CONCAT_GPU", "software", true)
-                // The engine's log at debug level (frame times, decoder choices), to see why the preview
-                // does not play on a slow phone. Remove once it does.
-                Os.setenv("CONCAT_LOG", "debug", true)
                 File(cacheDir, "exports").mkdirs()
                 init(filesDir.absolutePath, cacheDir.absolutePath)
                 NativeContext.start(this@CapCraftApplication)
