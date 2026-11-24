@@ -1041,6 +1041,17 @@ private fun MeTab(onLicences: () -> Unit, onAbout: () -> Unit, onCleared: (Strin
         }
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
             SettingRow("Clear cache", cache?.let(::size) ?: "") { clearing = true }
+            // a text file with the app's recent log, to send when something is wrong or to share the preview's frame rate
+            SettingRow("Share log", null) {
+                scope.launch {
+                    val report = withContext(Threads.commands) { runCatching { buildLogReport(context) }.getOrNull() }
+                    if (report == null) {
+                        onCleared("The log could not be made")
+                    } else {
+                        runCatching { shareLogReport(context, report) }.onFailure { onCleared("No app to share the log with") }
+                    }
+                }
+            }
             SettingRow("Licences", null, onLicences)
             SettingRow("About CapCraft", null, onAbout)
             SettingRow("Version", version, null)
