@@ -1,6 +1,6 @@
 # Builds CapCraft for 32-bit ARM phones (armeabi-v7a, e.g. Redmi A3) and keeps the APK as the run's
 # artifact. It runs by itself on every push to the armv7-build branch that changes src/ or this file,
-# and by hand: Actions › Build ARMv7 › Run workflow. It releases nothing.
+# and by hand: Actions › Build APK 32-bit › Run workflow. It releases nothing.
 #
 # A quick check (the scripts parse) runs first, so a typo costs a minute, not the whole build. Pushes
 # that arrive while a build runs cancel it: only the newest one is built.
@@ -12,7 +12,7 @@
 # Same recipe as release.yml, with the 32-bit target: FFmpeg built from source by
 # src/scripts/ffmpeg-mobile.sh, the sherpa-onnx runtime fetched by src/scripts/sherpa-mobile.sh, and
 # src/scripts/mobile-env.sh naming both for the build.
-name: Build ARMv7
+name: Build APK 32-bit
 
 on:
   push:
