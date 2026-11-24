@@ -1,5 +1,9 @@
 # Builds CapCraft for 32-bit ARM phones (armeabi-v7a, e.g. Redmi A3) and keeps the APK as the run's
-# artifact. Run it by hand: Actions › Build ARMv7 › Run workflow. It releases nothing.
+# artifact. It runs by itself on every push to the armv7-build branch that changes src/ or this file,
+# and by hand: Actions › Build ARMv7 › Run workflow. It releases nothing.
+#
+# A quick check (the scripts parse) runs first, so a typo costs a minute, not the whole build. Pushes
+# that arrive while a build runs cancel it: only the newest one is built.
 #
 # Without the release key's secrets the APK is signed with the debug key, which is fine for installing
 # on your own phone. Set "FFmpeg without ARM assembly" to true if the FFmpeg or link step fails with
@@ -11,6 +15,11 @@
 name: Build ARMv7
 
 on:
+  push:
+    branches: [armv7-build]
+    paths:
+      - 'src/**'
+      - '.github/workflows/build-armv7.yml'
   workflow_dispatch:
     inputs:
       ffmpeg_no_asm:
@@ -36,8 +45,21 @@ env:
   ABI: armeabi-v7a
 
 jobs:
+  check:
+    name: Quick checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Shell scripts parse
+        run: |
+          for f in src/scripts/*.sh; do
+            bash -n "$f" || { echo "::error file=$f::syntax error"; exit 1; }
+          done
+
   apk:
     name: APK (armeabi-v7a)
+    needs: check
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     steps:
