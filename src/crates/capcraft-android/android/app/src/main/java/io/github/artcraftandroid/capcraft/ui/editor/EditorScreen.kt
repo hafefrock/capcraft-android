@@ -282,12 +282,12 @@ fun Preview(vm: EditorViewModel, modifier: Modifier) {
         val boxH = with(density) { maxHeight.toPx() }
         val aspect = t.width.toFloat() / t.height.toFloat().coerceAtLeast(1f)
         val (shownW, shownH) = if (boxW / boxH > aspect) (boxH * aspect) to boxH else boxW to (boxW / aspect)
-        // the frame the engine draws: the shown size, at most 720 on its short side at rest and 180 while
+        // the frame the engine draws: the shown size, at most 720 on its short side at rest and 240 while
         // playing (it was 1080). On a low-end phone's GPU drawing and reading a frame back costs about 0.5
         // microseconds a pixel - 200 ms at 720x404, which caps playback near 5 frames a second - so a
         // moving picture is drawn small and stretched, and the one frame of a rest can afford the full
         // size. An export is unaffected.
-        val shortSide = if (vm.playing) 180f else 720f
+        val shortSide = if (vm.playing) 240f else 720f
         val cap = min(1f, shortSide / min(shownW, shownH).coerceAtLeast(1f))
         val frameW = ((shownW * cap).roundToInt() / 2 * 2).coerceAtLeast(2)
         val frameH = ((shownH * cap).roundToInt() / 2 * 2).coerceAtLeast(2)
