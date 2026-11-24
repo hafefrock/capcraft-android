@@ -417,33 +417,74 @@ private fun rememberFrames(vm: EditorViewModel, width: Int, height: Int): ImageB
             }
             android.util.Log.i("CapCraft", "playing: started at frame ${frameAt(vm.playhead)}, ${width}x$height")
             var shown = -1L
-            var ready: Bitmap? = null
-            var readyFrame = -1L
             var frames = 0
             var skipped = 0L
             var since = System.nanoTime()
             withContext(AndroidUiDispatcher.Main) {
-                while (isActive && vm.playing) {
-                    // each frame of the timeline is made once, while the one before it is on screen, and shown on the
-                    // display frame the playhead reaches it; one the engine was too slow for is skipped, not caught up
-                    // on, so the picture keeps time with the sound
-                    androidx.compose.runtime.withFrameNanos { }
-                    val frame = frameAt(vm.playhead)
-                    if (frame == shown) continue
-                    if (shown >= 0 && frame > shown + 1) skipped += frame - shown - 1
-                    val b = (if (frame == readyFrame) ready else null) ?: make(frame) ?: break
-                    image = b.asImageBitmap()
-                    shown = frame
-                    frames++
-                    val now = System.nanoTime()
-                    if (now - since >= 2_000_000_000L) {
-                        android.util.Log.d("CapCraft", "preview %.1f fps at %dx%d, %d frames skipped".format(frames * 1e9 / (now - since), width, height, skipped))
-                        frames = 0
-                        skipped = 0
-                        since = now
+                // Frames are made by a coroutine of their own, one after another with no gap, and queued; the loop below
+                // only shows what the playhead has reached. A frame is made for the instant it will be due when it is
+                // done (the playhead plus the time a frame has been taking), so a slow engine gives an even, steady
+                // picture rate - every second frame, say - instead of frames that arrive after their time and are thrown
+                // away. A frame that is late is still shown, never dropped.
+                val queue = ArrayDeque<Pair<Long, Bitmap>>()
+                var makeMs = 0.0
+                var epoch = 0
+                var failed = false
+                val producer = launch {
+                    while (isActive && vm.playing) {
+                        // two made ahead at most; with the one on screen and the one being made, that is all the
+                        // bitmaps there are
+                        if (queue.size >= 2) {
+                            androidx.compose.runtime.withFrameNanos { }
+                            continue
+                        }
+                        val mine = epoch
+                        val after = maxOf(shown, queue.lastOrNull()?.first ?: -1L)
+                        val frame = maxOf(frameAt(vm.playhead + (makeMs * 1000.0).toLong()), after + 1)
+                        val started = System.nanoTime()
+                        val b = make(frame)
+                        if (b == null) {
+                            failed = true
+                            break
+                        }
+                        val ms = (System.nanoTime() - started) / 1e6
+                        makeMs = if (makeMs == 0.0) ms else makeMs * 0.8 + ms * 0.2
+                        // the playhead was moved while it was made: a frame from before the move is of no use
+                        if (mine == epoch) queue.addLast(frame to b)
                     }
-                    readyFrame = frame + 1
-                    ready = make(readyFrame) ?: break
+                }
+                try {
+                    while (isActive && vm.playing && !failed) {
+                        androidx.compose.runtime.withFrameNanos { }
+                        val now = frameAt(vm.playhead)
+                        if (now < shown) {
+                            // the playhead went back (a seek while playing): start over from where it is
+                            queue.clear()
+                            epoch++
+                            shown = now - 1
+                        }
+                        var due: Pair<Long, Bitmap>? = null
+                        while (queue.isNotEmpty() && queue.first().first <= now) due = queue.removeFirst()
+                        val d = due ?: continue
+                        if (shown >= 0 && d.first > shown + 1) skipped += d.first - shown - 1
+                        image = d.second.asImageBitmap()
+                        shown = d.first
+                        frames++
+                        val t = System.nanoTime()
+                        if (t - since >= 2_000_000_000L) {
+                            android.util.Log.i(
+                                "CapCraft",
+                                "preview %.1f fps at %dx%d, a frame takes %.0f ms, %d timeline frames skipped".format(
+                                    frames * 1e9 / (t - since), width, height, makeMs, skipped,
+                                ),
+                            )
+                            frames = 0
+                            skipped = 0
+                            since = t
+                        }
+                    }
+                } finally {
+                    producer.cancel()
                 }
             }
         } else {
