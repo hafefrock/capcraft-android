@@ -325,17 +325,19 @@ impl Monitor {
         // Where a slow frame spent its time: reading and decoding the files, or drawing the frame
         // on the GPU and reading it back.
         let total = started.elapsed();
-        // every frame, with the clock of its end, to line up against the app's own timing
-        log::info!(
-            "preview frame at {:.2}s ({}x{}, moving {}): sources {:?}, draw and read back {:?}, total {:?}",
-            spec.time,
-            spec.width,
-            spec.height,
-            spec.moving,
-            sourced,
-            total - sourced,
-            total
-        );
+        // only a slow frame, and only in the debug log (CONCAT_LOG=debug): it was a line a frame at
+        // info, and filled the log file's cap in seconds
+        if total > std::time::Duration::from_millis(60) {
+            log::debug!(
+                "preview frame at {:.2}s ({}x{}, moving {}): sources {:?}, draw and read back {:?}",
+                spec.time,
+                spec.width,
+                spec.height,
+                spec.moving,
+                sourced,
+                total - sourced
+            );
+        }
         pixels
     }
 
