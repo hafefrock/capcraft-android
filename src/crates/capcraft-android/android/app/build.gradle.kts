@@ -96,10 +96,13 @@ abstract class CargoNdkBuild : DefaultTask() {
         // and the runtime libraries sherpa-onnx needs (its C API, ONNX Runtime, libc++).
         val keep = setOf("libcapcraft_android.so")
         File(out).walk().filter { it.isFile && it.name !in keep }.forEach { it.delete() }
+        // The folder's name is its ABI (vendor/sherpa-onnx/jniLibs/<abi>): arm64-v8a, armeabi-v7a
+        // or x86_64. Its libraries go in the matching ABI folder of the APK.
         val runtime = File(runtimeLibs.get())
-        if (runtime.isDirectory && "arm64-v8a" in abis.get()) {
+        val runtimeAbi = runtime.name
+        if (runtime.isDirectory && runtimeAbi in abis.get()) {
             runtime.listFiles { f -> f.extension == "so" }.orEmpty().forEach { lib ->
-                lib.copyTo(File(out, "arm64-v8a/${lib.name}"), overwrite = true)
+                lib.copyTo(File(out, "$runtimeAbi/${lib.name}"), overwrite = true)
             }
         }
     }

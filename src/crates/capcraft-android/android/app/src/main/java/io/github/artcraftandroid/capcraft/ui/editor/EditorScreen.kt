@@ -85,6 +85,16 @@ fun EditorScreen(path: String, incoming: List<Uri>, then: String? = null, close:
     val scope = rememberCoroutineScope()
     var exporting by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { vm.open(incoming, then) }
+    // The sound is handed to the player again a moment after the project opens, with nothing edited: the
+    // editor left before can clear the player after this one has loaded it, and a project opened again was
+    // silent (video and added sound alike) until an edit loaded it once more.
+    val openSession = vm.session
+    LaunchedEffect(openSession) {
+        val s = openSession ?: return@LaunchedEffect
+        delay(1200)
+        withContext(Threads.commands) { runCatching { s.applyBatch("[]") } }
+        android.util.Log.i("CapCraft", "sound: handed to the player again after opening")
+    }
     // the picker marks what this project holds already
     androidx.compose.runtime.DisposableEffect(path) {
         io.github.artcraftandroid.capcraft.ui.common.MediaPick.project = path
@@ -272,8 +282,13 @@ fun Preview(vm: EditorViewModel, modifier: Modifier) {
         val boxH = with(density) { maxHeight.toPx() }
         val aspect = t.width.toFloat() / t.height.toFloat().coerceAtLeast(1f)
         val (shownW, shownH) = if (boxW / boxH > aspect) (boxH * aspect) to boxH else boxW to (boxW / aspect)
-        // the frame the engine draws: the shown size, at most 1080 on its short side
-        val cap = min(1f, 1080f / min(shownW, shownH).coerceAtLeast(1f))
+        // the frame the engine draws: the shown size, at most 720 on its short side at rest and 180 while
+        // playing (it was 1080). On a low-end phone's GPU drawing and reading a frame back costs about 0.5
+        // microseconds a pixel - 200 ms at 720x404, which caps playback near 5 frames a second - so a
+        // moving picture is drawn small and stretched, and the one frame of a rest can afford the full
+        // size. An export is unaffected.
+        val shortSide = if (vm.playing) 180f else 720f
+        val cap = min(1f, shortSide / min(shownW, shownH).coerceAtLeast(1f))
         val frameW = ((shownW * cap).roundToInt() / 2 * 2).coerceAtLeast(2)
         val frameH = ((shownH * cap).roundToInt() / 2 * 2).coerceAtLeast(2)
         val image = rememberFrames(vm, frameW, frameH)
@@ -361,14 +376,46 @@ private fun rememberFrames(vm: EditorViewModel, width: Int, height: Int): ImageB
             val den = (vm.timeline?.fpsDen ?: 1L).coerceAtLeast(1L)
             fun frameAt(us: Long) = us * num / (den * 1_000_000L)
             fun timeOf(frame: Long) = (4 * frame + 1) * den * 1_000_000L / (4 * num)
+            var madeLogged = 0
             suspend fun make(frame: Long): Bitmap? {
+                val started = System.nanoTime()
+                var entered = started
+                var engineDone = started
                 val pic = withContext(Threads.preview) {
-                    runCatching { s.frame(timeOf(frame), width.toUInt(), height.toUInt(), Motion.PLAYING) }.getOrNull()
+                    entered = System.nanoTime()
+                    runCatching { s.frame(timeOf(frame), width.toUInt(), height.toUInt(), Motion.PLAYING) }
+                        .onFailure { android.util.Log.w("CapCraft", "playing: frame $frame failed: $it") }
+                        .getOrNull()
+                        .also { engineDone = System.nanoTime() }
                 } ?: return null
-                val b = pic.intoBitmap(buffers.take()) ?: return null
+                val backOnMain = System.nanoTime()
+                val b = pic.intoBitmap(buffers.take())
+                if (b == null) {
+                    android.util.Log.w("CapCraft", "playing: frame $frame came back without a bitmap")
+                    return null
+                }
+                if (madeLogged < 12) {
+                    madeLogged++
+                    val end = System.nanoTime()
+                    // where the time went: waiting for the preview thread, the engine call (Rust and what it
+                    // hands back), getting back on the main thread, and copying the pixels into the bitmap
+                    android.util.Log.i(
+                        "CapCraft",
+                        "playing: frame $frame made in %.0f ms (queue %.0f, engine %.0f, back on main %.0f, bitmap %.0f) at %dx%d".format(
+                            (end - started) / 1e6,
+                            (entered - started) / 1e6,
+                            (engineDone - entered) / 1e6,
+                            (backOnMain - engineDone) / 1e6,
+                            (end - backOnMain) / 1e6,
+                            width,
+                            height,
+                        ),
+                    )
+                }
                 buffers.put(b)
                 return b
             }
+            android.util.Log.i("CapCraft", "playing: started at frame ${frameAt(vm.playhead)}, ${width}x$height")
             var shown = -1L
             var ready: Bitmap? = null
             var readyFrame = -1L
@@ -402,8 +449,12 @@ private fun rememberFrames(vm: EditorViewModel, width: Int, height: Int): ImageB
         } else {
             suspend fun show(at: Long, motion: Motion) {
                 val started = System.nanoTime()
+                // a drag of the playhead makes a frame every few tenths of a second: drawn at two thirds of
+                // the rest size, so it stays as light as it was at 480
+                val w = if (motion == Motion.SCRUBBING) (width * 2 / 3 / 2 * 2).coerceAtLeast(2) else width
+                val h = if (motion == Motion.SCRUBBING) (height * 2 / 3 / 2 * 2).coerceAtLeast(2) else height
                 val pic = withContext(Threads.preview) {
-                    runCatching { s.frame(at, width.toUInt(), height.toUInt(), motion) }.getOrNull()
+                    runCatching { s.frame(at, w.toUInt(), h.toUInt(), motion) }.getOrNull()
                 } ?: return
                 if (motion == Motion.SCRUBBING) meter.add(started)
                 val b = pic.intoBitmap(buffers.take()) ?: return

@@ -3,6 +3,7 @@
 # the engine links.
 #
 #   scripts/ffmpeg-mobile.sh aarch64-linux-android [out-dir]
+#   scripts/ffmpeg-mobile.sh armv7-linux-androideabi [out-dir]   (32-bit phones, e.g. Redmi A3)
 #   scripts/ffmpeg-mobile.sh x86_64-linux-android [out-dir]   (the emulator's, never shipped)
 #   scripts/ffmpeg-mobile.sh aarch64-apple-ios     [out-dir]
 #   scripts/ffmpeg-mobile.sh aarch64-apple-ios-sim [out-dir]
@@ -21,7 +22,7 @@
 # the desktop bundles have no place there.
 set -euo pipefail
 
-target=${1:?target triple: aarch64-linux-android, x86_64-linux-android, aarch64-apple-ios or aarch64-apple-ios-sim}
+target=${1:?target triple: aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android, aarch64-apple-ios or aarch64-apple-ios-sim}
 workspace=$(cd "$(dirname "$0")/.." && pwd)
 out=${2:-$workspace/vendor/ffmpeg/$target}
 version=${FFMPEG_VERSION:-8.1}
@@ -63,7 +64,7 @@ common=(
 )
 
 case "$target" in
-  aarch64-linux-android|x86_64-linux-android)
+  aarch64-linux-android|armv7-linux-androideabi|x86_64-linux-android)
     ndk=${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}
     if [ -z "$ndk" ]; then
       sdk=${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Library/Android/sdk}}
@@ -76,19 +77,35 @@ case "$target" in
     # The x86_64 build is the one CI's emulators can run, never shipped:
     # FFmpeg's hand-written assembly is left out there, so the build needs
     # no assembler, and its speed is nobody's concern.
-    if [ "$target" = aarch64-linux-android ]; then
-      arch=(--arch=aarch64 --cpu=armv8-a)
-    else
-      arch=(--arch=x86_64 --disable-x86asm)
-    fi
+    # The NDK names its 32-bit ARM compilers armv7a-linux-androideabi<api>-clang,
+    # not after Rust's triple; the other targets are named alike in both.
+    clang_target=$target
+    extra_cflags="-fno-omit-frame-pointer"
+    case "$target" in
+      aarch64-linux-android)
+        arch=(--arch=aarch64 --cpu=armv8-a)
+        ;;
+      armv7-linux-androideabi)
+        # 32-bit ARM with NEON (every phone that runs Android 10 or newer
+        # has it). Set FFMPEG_ARM_ASM=0 to build without FFmpeg's hand-written
+        # assembly if the link step complains about text relocations.
+        clang_target=armv7a-linux-androideabi
+        arch=(--arch=arm --cpu=armv7-a --enable-neon)
+        extra_cflags="$extra_cflags -march=armv7-a -mfpu=neon -mfloat-abi=softfp"
+        if [ "${FFMPEG_ARM_ASM:-1}" = 0 ]; then arch+=(--disable-asm); fi
+        ;;
+      *)
+        arch=(--arch=x86_64 --disable-x86asm)
+        ;;
+    esac
     (cd "$build" && "$src/configure" "${common[@]}" \
       --target-os=android "${arch[@]}" \
       --sysroot="$ndk/toolchains/llvm/prebuilt/$host_tag/sysroot" \
-      --cc="$bin/$target$android_api-clang" \
-      --cxx="$bin/$target$android_api-clang++" \
+      --cc="$bin/$clang_target$android_api-clang" \
+      --cxx="$bin/$clang_target$android_api-clang++" \
       --ar="$bin/llvm-ar" --nm="$bin/llvm-nm" --ranlib="$bin/llvm-ranlib" --strip="$bin/llvm-strip" \
       --enable-jni --enable-mediacodec \
-      --extra-cflags="-fno-omit-frame-pointer" \
+      --extra-cflags="$extra_cflags" \
       --extra-ldflags="-Wl,-z,max-page-size=16384")
     ;;
   aarch64-apple-ios|aarch64-apple-ios-sim)
