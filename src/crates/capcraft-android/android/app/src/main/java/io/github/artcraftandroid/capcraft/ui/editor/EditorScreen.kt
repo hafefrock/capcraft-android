@@ -422,15 +422,16 @@ private fun rememberFrames(vm: EditorViewModel, width: Int, height: Int): ImageB
             var since = System.nanoTime()
             withContext(AndroidUiDispatcher.Main) {
                 // Frames are made by a coroutine of their own, one after another with no gap, and queued; the loop below
-                // only shows what the playhead has reached. The frames asked for run on in order, a step of one to four
-                // apart (how many the engine takes to make one), because a video's decoder reads ahead only along a
-                // straight run: asking for frames far apart made it seek to a key frame each time, which for a 1080p
-                // video took seconds a frame, and the longer it took the further apart the next was asked for. Only when
-                // the picture is a quarter of a second behind the playhead is one frame asked for where the playhead is
-                // (a seek, once). A frame that is late is still shown, never dropped.
+                // only shows what the playhead has reached. The frames asked for run on in order, a step of one to ten
+                // apart, because a video's decoder reads ahead only along a straight run: asking for frames far apart
+                // made it seek to a key frame each time, which for a 1080p video took seconds a frame (4 s in the
+                // first Share log), and the longer it took the further apart the next was asked for. The step is as
+                // many frames as the engine takes to make one, and more while the picture is behind the playhead: it
+                // catches up by reading on in a straight line, with no seek. Only when it is three seconds behind is a
+                // frame asked for where the playhead is. A frame that is late is still shown, never dropped.
                 val queue = ArrayDeque<Pair<Long, Bitmap>>()
                 val framePeriodMs = 1000.0 * den / num
-                val resyncFrames = (250_000L * num / (den * 1_000_000L)).coerceAtLeast(4L)
+                val resyncFrames = (3_000_000L * num / (den * 1_000_000L)).coerceAtLeast(30L)
                 var makeMs = 0.0
                 var step = 1L
                 var made = 0
@@ -447,9 +448,11 @@ private fun rememberFrames(vm: EditorViewModel, width: Int, height: Int): ImageB
                         val mine = epoch
                         val after = maxOf(shown, queue.lastOrNull()?.first ?: -1L)
                         val here = frameAt(vm.playhead)
+                        val behind = (here - after).coerceAtLeast(0L)
+                        step = (Math.ceil(makeMs / framePeriodMs).toLong() + behind / 8).coerceIn(1L, 10L)
                         val frame = when {
                             after < 0 -> here
-                            here - after > resyncFrames -> maxOf(frameAt(vm.playhead + (makeMs * 1000.0).toLong()), here)
+                            behind > resyncFrames -> maxOf(frameAt(vm.playhead + (makeMs * 1000.0).toLong()), here)
                             else -> after + step
                         }
                         val started = System.nanoTime()
@@ -462,7 +465,6 @@ private fun rememberFrames(vm: EditorViewModel, width: Int, height: Int): ImageB
                         // the first frame of a run is the decoder starting up, and not what a frame takes
                         made++
                         if (made == 2) makeMs = ms else if (made > 2) makeMs = makeMs * 0.8 + ms * 0.2
-                        step = Math.ceil(makeMs / framePeriodMs).toLong().coerceIn(1L, 4L)
                         // the playhead was moved while it was made: a frame from before the move is of no use
                         if (mine == epoch) queue.addLast(frame to b)
                     }
