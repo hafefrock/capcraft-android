@@ -291,13 +291,22 @@ fun Preview(vm: EditorViewModel, modifier: Modifier) {
         val cap = min(1f, shortSide / min(shownW, shownH).coerceAtLeast(1f))
         val frameW = ((shownW * cap).roundToInt() / 2 * 2).coerceAtLeast(2)
         val frameH = ((shownH * cap).roundToInt() / 2 * 2).coerceAtLeast(2)
-        val image = rememberFrames(vm, frameW, frameH)
+        // set while playing when the picture has stood still a while, waiting on the engine
+        val stalled = remember { mutableStateOf(false) }
+        val image = rememberFrames(vm, frameW, frameH, stalled)
         Box(
             Modifier
                 .size(with(density) { shownW.toDp() }, with(density) { shownH.toDp() })
                 .background(Color.Black),
         ) {
             image?.let { Image(it, contentDescription = null, contentScale = ContentScale.FillBounds, modifier = Modifier.fillMaxSize()) }
+            if (vm.playing && stalled.value) {
+                CircularProgressIndicator(
+                    color = Color.White,
+                    modifier = Modifier.align(Alignment.Center).size(34.dp),
+                    strokeWidth = 3.dp,
+                )
+            }
             // while drawing, the finger draws on the frame instead of moving what is on it
             // the eyedropper's tap goes to the picture, not into a stroke
             if (vm.panel == Panel.Draw && vm.pickColor == null) {
@@ -360,7 +369,12 @@ private class FrameBuffers {
 }
 
 @Composable
-private fun rememberFrames(vm: EditorViewModel, width: Int, height: Int): ImageBitmap? {
+private fun rememberFrames(
+    vm: EditorViewModel,
+    width: Int,
+    height: Int,
+    stalled: androidx.compose.runtime.MutableState<Boolean>,
+): ImageBitmap? {
     var image by remember { mutableStateOf<ImageBitmap?>(null) }
     val buffers = remember { FrameBuffers() }
     val meter = remember { ScrubMeter() }
@@ -368,6 +382,7 @@ private fun rememberFrames(vm: EditorViewModel, width: Int, height: Int): ImageB
     val revision = vm.timeline?.revision
     LaunchedEffect(session, revision, width, height, vm.playing) {
         val s = session ?: return@LaunchedEffect
+        stalled.value = false
         if (vm.playing) {
             // which frame of the timeline an instant falls in, and the instant a frame is made for: a quarter of the way
             // in, as the engine takes the frame nearest the time it is asked for, and the middle was a tie that
@@ -420,6 +435,8 @@ private fun rememberFrames(vm: EditorViewModel, width: Int, height: Int): ImageB
             var frames = 0
             var skipped = 0L
             var since = System.nanoTime()
+            // when a picture was last put on screen: the wait for the first one counts too
+            var lastShown = System.nanoTime()
             withContext(AndroidUiDispatcher.Main) {
                 // Frames are made by a coroutine of their own, one after another with no gap, and queued; the loop below
                 // only shows what the playhead has reached. The frames asked for run on in order, a step of one to ten
@@ -481,11 +498,18 @@ private fun rememberFrames(vm: EditorViewModel, width: Int, height: Int): ImageB
                         }
                         var due: Pair<Long, Bitmap>? = null
                         while (queue.isNotEmpty() && queue.first().first <= now) due = queue.removeFirst()
-                        val d = due ?: continue
+                        val d = due
+                        if (d == null) {
+                            // nothing new for most of a second: the picture is waiting on the engine
+                            stalled.value = System.nanoTime() - lastShown > 700_000_000L
+                            continue
+                        }
                         if (shown >= 0 && d.first > shown + 1) skipped += d.first - shown - 1
                         image = d.second.asImageBitmap()
                         shown = d.first
                         frames++
+                        lastShown = System.nanoTime()
+                        stalled.value = false
                         val t = System.nanoTime()
                         if (t - since >= 2_000_000_000L) {
                             android.util.Log.i(
@@ -501,6 +525,7 @@ private fun rememberFrames(vm: EditorViewModel, width: Int, height: Int): ImageB
                     }
                 } finally {
                     producer.cancel()
+                    stalled.value = false
                 }
             }
         } else {
