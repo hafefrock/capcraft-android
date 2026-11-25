@@ -64,7 +64,9 @@ impl FrameSpec {
     pub fn reading(&self) -> concat_media::Reading {
         if self.scrub {
             concat_media::Reading::Scrub
-        } else if self.proxy {
+        } else if self.proxy || (cfg!(target_os = "android") && self.moving) {
+            // on a phone a moving picture always reads the proxy where there is one: it is the only way a
+            // large file plays at all, and the picture is drawn small
             concat_media::Reading::Proxy
         } else {
             concat_media::Reading::Original

@@ -25,12 +25,25 @@ use concat_media::decode::{DecodeOptions, Decoder, FrameSource};
 use concat_media::{ColorRange, EncodeOptions, Encoder, FrameSink, Priority, RateMode, VideoCodec};
 
 /// A file with more pixels than this gets a proxy: anything larger than
-/// full HD.
+/// full HD. On a phone, anything larger than HD: a low-end phone's decoder
+/// reads a 1080p file at about twelve frames a second (the first Share log
+/// of a 1080p video on a Redmi A3), and the proxy of one is what lets it play.
+#[cfg(not(target_os = "android"))]
 const PIXELS_WITHOUT_PROXY: u64 = 1920 * 1080;
+#[cfg(target_os = "android")]
+const PIXELS_WITHOUT_PROXY: u64 = 1280 * 720;
 /// The proxy's long side is the original's divided by this, and never
-/// shorter than [`SHORTEST_LONG_SIDE`].
+/// shorter than [`SHORTEST_LONG_SIDE`]. On a phone, a file's proxy is
+/// 640 on its long side whatever its size: a moving picture is drawn small
+/// there.
+#[cfg(not(target_os = "android"))]
 const DIVISOR: u32 = 4;
+#[cfg(target_os = "android")]
+const DIVISOR: u32 = 8;
+#[cfg(not(target_os = "android"))]
 const SHORTEST_LONG_SIDE: u32 = 960;
+#[cfg(target_os = "android")]
+const SHORTEST_LONG_SIDE: u32 = 640;
 
 /// Whether a `width` by `height` file is worth a proxy.
 pub fn wanted(width: u32, height: u32) -> bool {

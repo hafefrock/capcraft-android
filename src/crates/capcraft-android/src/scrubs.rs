@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 CapCraft contributors
 
-//! Each video's scrub copy, read while the playhead is dragged: written in
-//! the background into the project's cache, one at a time, from the moment
-//! the video is added or the project opens. Playback and the playhead at
-//! rest read the files themselves. See `concat_host::scrub`.
+//! Each video's scrub copy, read while the playhead is dragged, and each
+//! larger video's proxy, read while the picture plays: written in the
+//! background into the project's cache, one at a time, from the moment the
+//! video is added or the project opens. The playhead at rest and the export
+//! read the files themselves. See `concat_host::scrub` and
+//! `concat_host::proxy`.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -44,8 +46,10 @@ fn videos(session: &Session) -> Vec<(String, Video)> {
         .collect()
 }
 
-/// Queues the copy of every video not in `seen`, then adds it there. A
-/// copy already written is adopted at once.
+/// Queues the scrub copy, and the proxy where the video is large enough for
+/// one, of every video not in `seen`, then adds it there. A copy already
+/// written is adopted at once. The scrub copy is queued first, so it is
+/// written ahead of the proxy.
 pub(crate) fn see_to(session: &Session, seen: &mut HashSet<String>) {
     let project = Path::new(session.path());
     for (id, video) in videos(session) {
@@ -58,6 +62,21 @@ pub(crate) fn see_to(session: &Session, seen: &mut HashSet<String>) {
                 video.range,
                 video.hdr,
             );
+            if concat_host::proxy::ensure(
+                project,
+                &video.path,
+                video.width,
+                video.height,
+                video.range,
+                video.hdr,
+            ) {
+                log::info!(
+                    "{}: {}x{}, a proxy is read while it plays",
+                    video.path,
+                    video.width,
+                    video.height
+                );
+            }
         }
     }
 }
@@ -76,5 +95,15 @@ pub(crate) fn sweep(session: &Session) {
             "{swept} stale scrub copies swept from {}",
             project.display()
         );
+    }
+    let keep: HashSet<_> = videos(session)
+        .iter()
+        .filter_map(|(_, video)| {
+            concat_host::proxy::path_for(project, &video.path, video.range, video.hdr)
+        })
+        .collect();
+    let swept = concat_host::proxy::sweep(project, &keep);
+    if swept > 0 {
+        log::info!("{swept} stale proxies swept from {}", project.display());
     }
 }
