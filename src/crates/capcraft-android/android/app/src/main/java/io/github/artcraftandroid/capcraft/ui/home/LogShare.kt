@@ -12,10 +12,16 @@ import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 /** The most of the engine's own log file that goes into a report, in bytes (its end: the newest lines). */
-private const val ENGINE_TAIL = 300_000L
+private const val ENGINE_TAIL = 5_000L
 
-/** How many of the app's latest logcat lines go into a report. */
-private const val LOGCAT_LINES = 3000
+/**
+ * How much of the app's own latest logcat goes into a report, in characters (its end). A report is kept small, a
+ * little under 20 KB in all, because a chat or an email may cut a longer text off at its end - the newest lines.
+ */
+private const val LOGCAT_CHARS = 11_000
+
+/** How many logcat lines are read before the report keeps the end of them. */
+private const val LOGCAT_LINES = 6000
 
 /**
  * A text file to send when something goes wrong: the phone and app, the app's own logcat lines (the preview's
@@ -35,7 +41,7 @@ internal fun buildLogReport(context: Context): File {
         w.appendLine("ABIs: ${Build.SUPPORTED_ABIS.joinToString()}")
         w.appendLine("Made: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())}")
         w.appendLine()
-        w.appendLine("===== App log (logcat, latest $LOGCAT_LINES lines) =====")
+        w.appendLine("===== App log (logcat: CapCraft's own lines and crashes, the newest last) =====")
         w.appendLine(appLogcat())
         w.appendLine()
         w.appendLine("===== Engine log file (the end of it) =====")
@@ -44,14 +50,22 @@ internal fun buildLogReport(context: Context): File {
     return out
 }
 
-/** This app's own latest logcat lines; it may read its own process's log without any permission. */
+/**
+ * This app's own latest logcat lines - its own tags and crashes, not the system's chatter, which fills the log with
+ * hundreds of lines a second. It may read its own process's log without any permission.
+ */
 private fun appLogcat(): String = runCatching {
-    val process = ProcessBuilder("logcat", "-d", "-t", LOGCAT_LINES.toString(), "--pid=${android.os.Process.myPid()}")
+    val process = ProcessBuilder(
+        "logcat", "-d", "-t", LOGCAT_LINES.toString(), "--pid=${android.os.Process.myPid()}",
+        "-s", "CapCraft:V", "capcraft:V", "AndroidRuntime:E", "DEBUG:I",
+    )
         .redirectErrorStream(true)
         .start()
     val text = process.inputStream.bufferedReader().readText()
     if (!process.waitFor(5, TimeUnit.SECONDS)) process.destroy()
-    text.ifBlank { "(logcat gave nothing)" }
+    // the end of it, from a whole line
+    val kept = if (text.length > LOGCAT_CHARS) text.takeLast(LOGCAT_CHARS).substringAfter('\n') else text
+    kept.ifBlank { "(logcat gave nothing)" }
 }.getOrElse { "(logcat could not be read: $it)" }
 
 /** The end of the newest engine log file, wherever the engine keeps its logs folder under the app's files. */

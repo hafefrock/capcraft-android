@@ -422,12 +422,18 @@ private fun rememberFrames(vm: EditorViewModel, width: Int, height: Int): ImageB
             var since = System.nanoTime()
             withContext(AndroidUiDispatcher.Main) {
                 // Frames are made by a coroutine of their own, one after another with no gap, and queued; the loop below
-                // only shows what the playhead has reached. A frame is made for the instant it will be due when it is
-                // done (the playhead plus the time a frame has been taking), so a slow engine gives an even, steady
-                // picture rate - every second frame, say - instead of frames that arrive after their time and are thrown
-                // away. A frame that is late is still shown, never dropped.
+                // only shows what the playhead has reached. The frames asked for run on in order, a step of one to four
+                // apart (how many the engine takes to make one), because a video's decoder reads ahead only along a
+                // straight run: asking for frames far apart made it seek to a key frame each time, which for a 1080p
+                // video took seconds a frame, and the longer it took the further apart the next was asked for. Only when
+                // the picture is a quarter of a second behind the playhead is one frame asked for where the playhead is
+                // (a seek, once). A frame that is late is still shown, never dropped.
                 val queue = ArrayDeque<Pair<Long, Bitmap>>()
+                val framePeriodMs = 1000.0 * den / num
+                val resyncFrames = (250_000L * num / (den * 1_000_000L)).coerceAtLeast(4L)
                 var makeMs = 0.0
+                var step = 1L
+                var made = 0
                 var epoch = 0
                 var failed = false
                 val producer = launch {
@@ -440,7 +446,12 @@ private fun rememberFrames(vm: EditorViewModel, width: Int, height: Int): ImageB
                         }
                         val mine = epoch
                         val after = maxOf(shown, queue.lastOrNull()?.first ?: -1L)
-                        val frame = maxOf(frameAt(vm.playhead + (makeMs * 1000.0).toLong()), after + 1)
+                        val here = frameAt(vm.playhead)
+                        val frame = when {
+                            after < 0 -> here
+                            here - after > resyncFrames -> maxOf(frameAt(vm.playhead + (makeMs * 1000.0).toLong()), here)
+                            else -> after + step
+                        }
                         val started = System.nanoTime()
                         val b = make(frame)
                         if (b == null) {
@@ -448,7 +459,10 @@ private fun rememberFrames(vm: EditorViewModel, width: Int, height: Int): ImageB
                             break
                         }
                         val ms = (System.nanoTime() - started) / 1e6
-                        makeMs = if (makeMs == 0.0) ms else makeMs * 0.8 + ms * 0.2
+                        // the first frame of a run is the decoder starting up, and not what a frame takes
+                        made++
+                        if (made == 2) makeMs = ms else if (made > 2) makeMs = makeMs * 0.8 + ms * 0.2
+                        step = Math.ceil(makeMs / framePeriodMs).toLong().coerceIn(1L, 4L)
                         // the playhead was moved while it was made: a frame from before the move is of no use
                         if (mine == epoch) queue.addLast(frame to b)
                     }
@@ -474,8 +488,8 @@ private fun rememberFrames(vm: EditorViewModel, width: Int, height: Int): ImageB
                         if (t - since >= 2_000_000_000L) {
                             android.util.Log.i(
                                 "CapCraft",
-                                "preview %.1f fps at %dx%d, a frame takes %.0f ms, %d timeline frames skipped".format(
-                                    frames * 1e9 / (t - since), width, height, makeMs, skipped,
+                                "preview %.1f fps at %dx%d, a frame takes %.0f ms, step %d, %d timeline frames skipped".format(
+                                    frames * 1e9 / (t - since), width, height, makeMs, step, skipped,
                                 ),
                             )
                             frames = 0
