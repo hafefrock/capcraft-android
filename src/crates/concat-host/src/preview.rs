@@ -330,6 +330,22 @@ impl Monitor {
         let total = started.elapsed();
         // only a slow frame, and only in the debug log (CONCAT_LOG=debug): it was a line a frame at
         // info, and filled the log file's cap in seconds
+        // the first moving frames of the run at info, so a Share log says which copy a playing picture
+        // reads and where each one spent its time
+        if spec.moving {
+            static LOGGED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let logged = LOGGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if logged < 40 && logged % 4 == 0 {
+                let (scrubs, proxies) = self.pool.copies();
+                log::info!(
+                    "preview frame at {:.2}s reads {:?} ({scrubs} scrub copies, {proxies} proxies adopted): sources {:?}, draw and read back {:?}",
+                    spec.time,
+                    spec.reading(),
+                    sourced,
+                    total - sourced
+                );
+            }
+        }
         if total > std::time::Duration::from_millis(60) {
             log::debug!(
                 "preview frame at {:.2}s ({}x{}, moving {}): sources {:?}, draw and read back {:?}",
