@@ -802,6 +802,15 @@ impl ReaderPool {
         }
     }
 
+    /// How many files have a scrub copy and how many a proxy adopted now,
+    /// for a log line that says what a playing picture can read.
+    pub fn copies(&self) -> (usize, usize) {
+        (
+            self.scrubs.lock().map_or(0, |scrubs| scrubs.len()),
+            self.proxies.lock().map_or(0, |proxies| proxies.len()),
+        )
+    }
+
     /// The scrub copy adopted for `original`, if one was.
     pub fn scrub_of(&self, original: &Path) -> Option<PathBuf> {
         self.scrubs.lock().ok()?.get(original).cloned()
