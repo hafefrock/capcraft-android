@@ -62,11 +62,12 @@ pub struct FrameSpec {
 impl FrameSpec {
     /// Which copy of each file the frame is read from.
     pub fn reading(&self) -> concat_media::Reading {
-        if self.scrub {
+        if self.scrub || (cfg!(target_os = "android") && self.moving) {
+            // on a phone a moving picture reads the scrub copy where there is one (every frame its own small
+            // picture, so a frame is one cheap decode: a large file plays at all only this way), else the
+            // proxy, else the file
             concat_media::Reading::Scrub
-        } else if self.proxy || (cfg!(target_os = "android") && self.moving) {
-            // on a phone a moving picture always reads the proxy where there is one: it is the only way a
-            // large file plays at all, and the picture is drawn small
+        } else if self.proxy {
             concat_media::Reading::Proxy
         } else {
             concat_media::Reading::Original

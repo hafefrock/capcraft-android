@@ -138,6 +138,18 @@ pub fn ensure(
     true
 }
 
+/// Whether the scrub copy of `media` under `project` is queued or being
+/// written now: not yet there, and on its way.
+pub fn pending(project: &Path, media: &str, range: Option<ColorRange>) -> bool {
+    let Some(target) = path_for(project, media, range) else {
+        return false;
+    };
+    writing()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .contains(&target)
+}
+
 /// The copies being written now, by target, so one is never queued twice
 /// and a sweep leaves it for its writer to finish.
 fn writing() -> &'static Mutex<HashSet<PathBuf>> {

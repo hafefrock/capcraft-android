@@ -79,14 +79,17 @@ pub(crate) fn see_to(session: &Session, seen: &mut HashSet<String>) {
                 video.hdr,
             );
             let wanted = concat_host::proxy::wanted(video.width, video.height);
-            let queued = concat_host::proxy::ensure(
-                project,
-                &video.path,
-                video.width,
-                video.height,
-                video.range,
-                video.hdr,
-            );
+            // on a phone a picture that plays reads the scrub copy, so a proxy is written only for the
+            // video that has no scrub copy (an HDR one): one copy to wait for, not two
+            let queued = (!cfg!(target_os = "android") || video.hdr)
+                && concat_host::proxy::ensure(
+                    project,
+                    &video.path,
+                    video.width,
+                    video.height,
+                    video.range,
+                    video.hdr,
+                );
             // what was decided, so a Share log says why a video has no proxy
             log::info!(
                 "copies: {}: {}x{}, proxy {}",
@@ -95,6 +98,8 @@ pub(crate) fn see_to(session: &Session, seen: &mut HashSet<String>) {
                 video.height,
                 if queued {
                     "queued or adopted, read while it plays"
+                } else if wanted && !video.hdr && cfg!(target_os = "android") {
+                    "none: it plays from the scrub copy"
                 } else if wanted {
                     "wanted, but the file cannot be read"
                 } else {
@@ -122,7 +127,12 @@ fn progress(session: &Session) -> ProxyProgress {
             continue;
         }
         total += 1;
-        if concat_host::proxy::pending(project, &video.path, video.range, video.hdr) {
+        let waiting = if cfg!(target_os = "android") && !video.hdr {
+            concat_host::scrub::pending(project, &video.path, video.range)
+        } else {
+            concat_host::proxy::pending(project, &video.path, video.range, video.hdr)
+        };
+        if waiting {
             pending += 1;
         }
     }
