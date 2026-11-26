@@ -215,50 +215,84 @@ pub fn write(
         options = options.in_software().threaded(2);
     }
     let mut decoder = Decoder::open(source, &options).map_err(|error| error.to_string())?;
-    let mut writer = ScrubWriter::create(&partial, width, height, copy_rate, QUALITY)
-        .map_err(|error| error.to_string())?;
-    let result = (|| {
+    // The frames are read on this thread and written on another, so the one is not waiting for the
+    // other: the copy is ready when the slower of the two is. The writer is made on its own thread,
+    // and a few frames wait between them.
+    let result = std::thread::scope(|scope| -> Result<(u64, f64, f64, i64), String> {
+        let partial = &partial;
+        let (queue, frames) = std::sync::mpsc::sync_channel::<(concat_core::frame::Frame, u32)>(6);
+        let writing = scope.spawn(move || -> Result<(u64, std::time::Duration), String> {
+            let mut writer = ScrubWriter::create(partial, width, height, copy_rate, QUALITY)
+                .map_err(|error| error.to_string())?;
+            let mut spent = std::time::Duration::ZERO;
+            for (frame, times) in frames {
+                let began = std::time::Instant::now();
+                for _ in 0..times {
+                    writer
+                        .write_frame(&frame)
+                        .map_err(|error| error.to_string())?;
+                }
+                spent += began.elapsed();
+            }
+            writer.finish().map_err(|error| error.to_string())?;
+            let written = writer.written();
+            drop(writer);
+            Ok((written, spent))
+        });
         let slot = copy_rate.frame_duration();
         let half = slot / Rational::from_int(2);
         let mut decoded: i64 = 0;
-        // where the time goes: reading the file's frames, and writing the copy's
+        let mut slots: i64 = 0;
+        // where the time goes: reading the file's frames
         let mut reading = std::time::Duration::ZERO;
-        let mut writing_time = std::time::Duration::ZERO;
-        loop {
-            let began = std::time::Instant::now();
-            let next = decoder.next_frame().map_err(|error| error.to_string())?;
-            reading += began.elapsed();
-            let Some(frame) = next else { break };
-            let at = decoder
-                .position()
-                .unwrap_or_else(|| rate.time_of_frame(decoded));
-            decoded += 1;
-            // Every slot up to this frame's instant, and half a slot past
-            // it, shows this frame: the nearest one to each.
-            let began = std::time::Instant::now();
-            while copy_rate.time_of_frame(writer.written() as i64) <= at + half {
-                writer
-                    .write_frame(&frame)
-                    .map_err(|error| error.to_string())?;
+        let read = (|| -> Result<(), String> {
+            loop {
+                let began = std::time::Instant::now();
+                let next = decoder.next_frame().map_err(|error| error.to_string())?;
+                reading += began.elapsed();
+                let Some(frame) = next else { return Ok(()) };
+                let at = decoder
+                    .position()
+                    .unwrap_or_else(|| rate.time_of_frame(decoded));
+                decoded += 1;
+                // Every slot up to this frame's instant, and half a slot past
+                // it, shows this frame: the nearest one to each.
+                let mut times = 0u32;
+                while copy_rate.time_of_frame(slots) <= at + half {
+                    slots += 1;
+                    times += 1;
+                }
+                if times > 0 && queue.send((frame, times)).is_err() {
+                    // the writer stopped: its error is the one to report
+                    return Ok(());
+                }
             }
-            writing_time += began.elapsed();
-        }
-        writer.finish().map_err(|error| error.to_string())?;
-        log::info!(
-            "{source}: scrub copy: {decoded} frames read in {:.1} s ({:.1} a second), {} written in {:.1} s",
+        })();
+        drop(queue);
+        let wrote = writing
+            .join()
+            .map_err(|_| "the scrub copy's writer stopped".to_owned())?;
+        let (written, writing_time) = wrote?;
+        read?;
+        Ok((
+            written,
             reading.as_secs_f64(),
-            decoded as f64 / reading.as_secs_f64().max(0.001),
-            writer.written(),
-            writing_time.as_secs_f64()
-        );
-        Ok(writer.written())
-    })();
-    drop(writer);
+            writing_time.as_secs_f64(),
+            decoded,
+        ))
+    });
     drop(decoder);
     match result {
-        Ok(frames) => std::fs::rename(&partial, target)
-            .map(|()| frames)
-            .map_err(|error| format!("{}: {error}", target.display())),
+        Ok((frames, reading, writing_time, decoded)) => {
+            // how long each half took, on its own thread: the copy took the longer of the two
+            log::info!(
+                "{source}: scrub copy: {decoded} frames read in {reading:.1} s ({:.1} a second), {frames} written in {writing_time:.1} s",
+                decoded as f64 / reading.max(0.001),
+            );
+            std::fs::rename(&partial, target)
+                .map(|()| frames)
+                .map_err(|error| format!("{}: {error}", target.display()))
+        }
         Err(error) => {
             let _ = std::fs::remove_file(&partial);
             Err(error)
