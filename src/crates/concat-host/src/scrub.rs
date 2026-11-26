@@ -221,20 +221,36 @@ pub fn write(
         let slot = copy_rate.frame_duration();
         let half = slot / Rational::from_int(2);
         let mut decoded: i64 = 0;
-        while let Some(frame) = decoder.next_frame().map_err(|error| error.to_string())? {
+        // where the time goes: reading the file's frames, and writing the copy's
+        let mut reading = std::time::Duration::ZERO;
+        let mut writing_time = std::time::Duration::ZERO;
+        loop {
+            let began = std::time::Instant::now();
+            let next = decoder.next_frame().map_err(|error| error.to_string())?;
+            reading += began.elapsed();
+            let Some(frame) = next else { break };
             let at = decoder
                 .position()
                 .unwrap_or_else(|| rate.time_of_frame(decoded));
             decoded += 1;
             // Every slot up to this frame's instant, and half a slot past
             // it, shows this frame: the nearest one to each.
+            let began = std::time::Instant::now();
             while copy_rate.time_of_frame(writer.written() as i64) <= at + half {
                 writer
                     .write_frame(&frame)
                     .map_err(|error| error.to_string())?;
             }
+            writing_time += began.elapsed();
         }
         writer.finish().map_err(|error| error.to_string())?;
+        log::info!(
+            "{source}: scrub copy: {decoded} frames read in {:.1} s ({:.1} a second), {} written in {:.1} s",
+            reading.as_secs_f64(),
+            decoded as f64 / reading.as_secs_f64().max(0.001),
+            writer.written(),
+            writing_time.as_secs_f64()
+        );
         Ok(writer.written())
     })();
     drop(writer);
