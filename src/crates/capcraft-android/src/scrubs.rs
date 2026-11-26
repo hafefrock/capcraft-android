@@ -10,9 +10,12 @@
 
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::Arc;
 
 use concat_host::session::Session;
 use concat_project::model::MediaKind;
+
+use crate::session::MobileSession;
 
 /// One video a copy is made from: its path, size, the range it is read as
 /// and whether it is HDR.
@@ -52,7 +55,20 @@ fn videos(session: &Session) -> Vec<(String, Video)> {
 /// written ahead of the proxy.
 pub(crate) fn see_to(session: &Session, seen: &mut HashSet<String>) {
     let project = Path::new(session.path());
-    for (id, video) in videos(session) {
+    let all = videos(session);
+    let in_project = session
+        .project()
+        .media
+        .iter()
+        .filter(|item| item.kind == MediaKind::Video && !item.placeholder)
+        .count();
+    if all.len() < in_project {
+        log::info!(
+            "copies: {} of the project's {in_project} videos have no size on record and get none",
+            in_project - all.len()
+        );
+    }
+    for (id, video) in all {
         if seen.insert(id) {
             concat_host::scrub::ensure(
                 project,
@@ -62,23 +78,67 @@ pub(crate) fn see_to(session: &Session, seen: &mut HashSet<String>) {
                 video.range,
                 video.hdr,
             );
-            if concat_host::proxy::ensure(
+            let wanted = concat_host::proxy::wanted(video.width, video.height);
+            let queued = concat_host::proxy::ensure(
                 project,
                 &video.path,
                 video.width,
                 video.height,
                 video.range,
                 video.hdr,
-            ) {
-                log::info!(
-                    "{}: {}x{}, a proxy is read while it plays",
-                    video.path,
-                    video.width,
-                    video.height
-                );
-            }
+            );
+            // what was decided, so a Share log says why a video has no proxy
+            log::info!(
+                "copies: {}: {}x{}, proxy {}",
+                video.path,
+                video.width,
+                video.height,
+                if queued {
+                    "queued or adopted, read while it plays"
+                } else if wanted {
+                    "wanted, but the file cannot be read"
+                } else {
+                    "not needed (not over 1280x720)"
+                }
+            );
         }
     }
+}
+
+/// How far the proxies of a session's videos are: of those worth one, how
+/// many are queued or being written, and how many there are.
+#[derive(uniffi::Record)]
+pub struct ProxyProgress {
+    pub pending: u32,
+    pub total: u32,
+}
+
+fn progress(session: &Session) -> ProxyProgress {
+    let project = Path::new(session.path());
+    let mut pending = 0;
+    let mut total = 0;
+    for (_, video) in videos(session) {
+        if !concat_host::proxy::wanted(video.width, video.height) {
+            continue;
+        }
+        total += 1;
+        if concat_host::proxy::pending(project, &video.path, video.range, video.hdr) {
+            pending += 1;
+        }
+    }
+    ProxyProgress { pending, total }
+}
+
+/// The progress of `session`'s proxies, for the wait the editor shows while
+/// they are written.
+#[uniffi::export]
+pub fn proxy_progress(session: Arc<MobileSession>) -> ProxyProgress {
+    session
+        .with_session(|session| Ok(progress(session)))
+        .unwrap_or(ProxyProgress {
+            pending: 0,
+            total: 0,
+        })
 }
 
 /// Removes the copies of media no longer in the project, or read as a

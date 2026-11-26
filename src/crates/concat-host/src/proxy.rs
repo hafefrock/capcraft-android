@@ -108,6 +108,20 @@ pub fn existing(project: &Path, media: &str, range: Option<ColorRange>) -> Optio
         .find(|path| path.is_file())
 }
 
+/// Whether the proxy of `media` under `project` is queued or being written
+/// now: not yet there, and on its way. A copy that was written, or one that
+/// failed (it is logged, and is not tried again until the project is
+/// opened), is not pending.
+pub fn pending(project: &Path, media: &str, range: Option<ColorRange>, hdr: bool) -> bool {
+    let Some(target) = path_for(project, media, range, hdr) else {
+        return false;
+    };
+    writing()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .contains(&target)
+}
+
 /// Sees to it that `media` - `width` by `height`, read as `range` - has
 /// a proxy when it is worth one: an existing copy is adopted into the
 /// reader pool at once; otherwise one is queued to be written on the

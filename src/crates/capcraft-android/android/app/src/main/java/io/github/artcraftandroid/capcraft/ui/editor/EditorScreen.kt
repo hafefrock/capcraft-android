@@ -57,6 +57,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import io.github.artcraftandroid.capcraft.core.Motion
+import io.github.artcraftandroid.capcraft.core.proxyProgress
 import io.github.artcraftandroid.capcraft.engine.Media
 import io.github.artcraftandroid.capcraft.engine.Threads
 import io.github.artcraftandroid.capcraft.engine.clock
@@ -94,6 +95,35 @@ fun EditorScreen(path: String, incoming: List<Uri>, then: String? = null, close:
         delay(1200)
         withContext(Threads.commands) { runCatching { s.applyBatch("[]") } }
         android.util.Log.i("CapCraft", "sound: handed to the player again after opening")
+    }
+    // The wait while the proxies - the light copies a large video plays from - are written, once a video is added
+    // or the project opened: the editor is locked under "Loading", with a way out after ten seconds, and the
+    // wait ends by itself after five minutes. A copy written is kept, so a project opened again does not wait.
+    var preparing by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+    var canSkip by remember { mutableStateOf(false) }
+    var skippedAt by remember { mutableStateOf(0) }
+    var pendingNow by remember { mutableStateOf(0) }
+    val rev = vm.timeline?.revision
+    LaunchedEffect(openSession, rev) {
+        val s = openSession ?: return@LaunchedEffect
+        val limit = SystemClock.uptimeMillis() + 5 * 60_000L
+        var started = 0L
+        while (isActive && SystemClock.uptimeMillis() < limit) {
+            val progress = withContext(Threads.commands) { runCatching { proxyProgress(s) }.getOrNull() } ?: break
+            val pending = progress.pending.toInt()
+            val total = progress.total.toInt()
+            pendingNow = pending
+            if (pending == 0) {
+                skippedAt = 0
+                break
+            }
+            if (started == 0L) started = SystemClock.uptimeMillis()
+            canSkip = SystemClock.uptimeMillis() - started >= 10_000L
+            preparing = if (pending > skippedAt) (total - pending + 1) to total else null
+            delay(500)
+        }
+        preparing = null
+        canSkip = false
     }
     // the picker marks what this project holds already
     androidx.compose.runtime.DisposableEffect(path) {
@@ -196,6 +226,16 @@ fun EditorScreen(path: String, incoming: List<Uri>, then: String? = null, close:
         if (vm.exportSheet) ExportSheet(vm, onExport = ::export)
         if (vm.editingCover) CoverEditor(vm, onClose = { vm.editingCover = false })
         vm.busy?.let { Busy(it) }
+        preparing?.let { (index, total) ->
+            Preparing(
+                label = if (total > 1) "Loading $index/$total" else "Loading",
+                canSkip = canSkip,
+                onSkip = {
+                    skippedAt = pendingNow
+                    preparing = null
+                },
+            )
+        }
         if (exporting) {
             ExportScreen(vm, onClose = { exporting = false }, onHome = { exporting = false; leave() })
         }
@@ -715,6 +755,35 @@ private fun Busy(label: String) {
             CircularProgressIndicator(color = Palette.Accent, modifier = Modifier.size(32.dp), strokeWidth = 2.5.dp)
             Spacer(Modifier.height(12.dp))
             Text(label, style = Type.Body)
+        }
+    }
+}
+
+/** The wait for the light copies of large videos: the editor locked under a label, and a way out once it has gone on a while. */
+@Composable
+private fun Preparing(label: String, canSkip: Boolean, onSkip: () -> Unit) {
+    Box(
+        Modifier.fillMaxSize().background(Color(0x88000000)).clickable(enabled = true, onClick = {}),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            Modifier.clip(RoundedCornerShape(12.dp)).background(Palette.Panel).padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            CircularProgressIndicator(color = Palette.Accent, modifier = Modifier.size(32.dp), strokeWidth = 2.5.dp)
+            Spacer(Modifier.height(12.dp))
+            Text(label, style = Type.Body)
+            if (canSkip) {
+                Spacer(Modifier.height(14.dp))
+                Text(
+                    "Skip",
+                    style = Type.BodyStrong.copy(color = Palette.Accent),
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .clickable(onClick = onSkip)
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                )
+            }
         }
     }
 }
