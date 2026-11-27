@@ -662,7 +662,21 @@ pub struct ReaderPool {
     /// The scrub copy for each file that has one; see
     /// [`ReaderPool::adopt_scrub`].
     scrubs: Mutex<HashMap<PathBuf, PathBuf>>,
+    /// The scrub copy written in parts, each covering a stretch of the
+    /// file: a part is read for the instants it covers while the rest is
+    /// still being written. See [`ReaderPool::adopt_scrub_part`].
+    scrub_parts: Mutex<HashMap<PathBuf, Vec<ScrubPart>>>,
     counters: Counters,
+}
+
+/// One part of a scrub copy: the file it is, the instant of the original
+/// its first frame shows, and the instant its stretch ends (`None` for the
+/// last part, which runs to the end).
+#[derive(Clone, Debug)]
+struct ScrubPart {
+    start: Rational,
+    end: Option<Rational>,
+    path: PathBuf,
 }
 
 /// The stills held in memory, and the order they came in.
@@ -695,6 +709,7 @@ impl ReaderPool {
             memory: Mutex::new((HashMap::new(), std::collections::VecDeque::new())),
             proxies: Mutex::new(HashMap::new()),
             scrubs: Mutex::new(HashMap::new()),
+            scrub_parts: Mutex::new(HashMap::new()),
             counters: Counters::default(),
         }
     }
@@ -806,7 +821,11 @@ impl ReaderPool {
     /// for a log line that says what a playing picture can read.
     pub fn copies(&self) -> (usize, usize) {
         (
-            self.scrubs.lock().map_or(0, |scrubs| scrubs.len()),
+            self.scrubs.lock().map_or(0, |scrubs| scrubs.len())
+                + self
+                    .scrub_parts
+                    .lock()
+                    .map_or(0, |parts| parts.values().map(Vec::len).sum()),
             self.proxies.lock().map_or(0, |proxies| proxies.len()),
         )
     }
@@ -814,6 +833,39 @@ impl ReaderPool {
     /// The scrub copy adopted for `original`, if one was.
     pub fn scrub_of(&self, original: &Path) -> Option<PathBuf> {
         self.scrubs.lock().ok()?.get(original).cloned()
+    }
+
+    /// Adopts one part of the scrub copy of `original`: `part` holds the
+    /// original's instants from `start` to `end` (to the end of the file
+    /// when `None`), its first frame being the one at `start`. A part
+    /// already adopted for the same `start` is replaced. Read, for the
+    /// instants it covers, by every request that is scrubbing or playing.
+    pub fn adopt_scrub_part(
+        &self,
+        original: &Path,
+        start: Rational,
+        end: Option<Rational>,
+        part: PathBuf,
+    ) {
+        if let Ok(mut all) = self.scrub_parts.lock() {
+            let parts = all.entry(original.to_path_buf()).or_default();
+            parts.retain(|known| known.start != start);
+            parts.push(ScrubPart {
+                start,
+                end,
+                path: part,
+            });
+        }
+    }
+
+    /// The part of `original`'s scrub copy that covers `time`, with the
+    /// instant its first frame shows; `None` where no part does.
+    pub fn scrub_part_at(&self, original: &Path, time: Rational) -> Option<(PathBuf, Rational)> {
+        let all = self.scrub_parts.lock().ok()?;
+        all.get(original)?
+            .iter()
+            .find(|part| part.start <= time && part.end.is_none_or(|end| time < end))
+            .map(|part| (part.path.clone(), part.start))
     }
 
     /// Drops every cached frame cut from `path` and its probed facts: for
@@ -874,25 +926,31 @@ impl ReaderPool {
     /// The file a request reads: a scrubbing one its scrub copy, else its
     /// proxy; one that asks for a proxy the proxy; the file itself when
     /// it has neither.
-    fn path_for(&self, request: &FrameRequest) -> PathBuf {
-        if request.scrub
-            && let Some(scrub) = self.scrub_of(&request.path)
-        {
-            return scrub;
+    fn path_for(&self, request: &FrameRequest) -> (PathBuf, Rational) {
+        let zero = Rational::from_int(0);
+        if request.scrub {
+            if let Some(scrub) = self.scrub_of(&request.path) {
+                return (scrub, zero);
+            }
+            // a scrub copy written in parts: the one that covers the instant, read from
+            // the instant it starts at
+            if let Some((part, start)) = self.scrub_part_at(&request.path, request.time) {
+                return (part, start);
+            }
         }
         if (request.proxy || request.scrub)
             && let Some(proxy) = self.proxy_of(&request.path)
         {
-            return proxy;
+            return (proxy, zero);
         }
-        request.path.clone()
+        (request.path.clone(), zero)
     }
 
     /// The source frame a request needs and where it sits: the file it
     /// reads, its facts, and the key of the frame at the level that covers
     /// the request.
     fn locate(&self, request: &FrameRequest) -> Result<(Arc<MediaFacts>, SourceKey)> {
-        let mut path = self.path_for(request);
+        let (mut path, mut offset) = self.path_for(request);
         let facts = match self.facts_for(&path, request.still) {
             Ok(facts) => facts,
             // A proxy that cannot be read - the cache cleared under the
@@ -911,12 +969,19 @@ impl ReaderPool {
                         stand_ins.remove(&request.path);
                     }
                 }
+                if let Ok(mut all) = self.scrub_parts.lock()
+                    && let Some(parts) = all.get_mut(&request.path)
+                {
+                    parts.retain(|part| part.path != path);
+                }
                 path = request.path.clone();
+                offset = Rational::from_int(0);
                 self.facts_for(&path, request.still)?
             }
             Err(error) => return Err(error),
         };
-        let index = facts.index_at(request.time);
+        // a part of a scrub copy starts at the instant it was cut from
+        let index = facts.index_at(request.time - offset);
         // A still is cut to the size asked for: one decode, kept, and the
         // levels of a photograph are not worth a photograph's worth of
         // memory each. The size asked for, not the cover: the cover is the
@@ -1376,6 +1441,9 @@ impl ReaderPool {
         }
         if let Ok(mut scrubs) = self.scrubs.lock() {
             scrubs.clear();
+        }
+        if let Ok(mut parts) = self.scrub_parts.lock() {
+            parts.clear();
         }
     }
 }

@@ -80,11 +80,13 @@ pub fn path_for(project: &Path, media: &str, range: Option<ColorRange>) -> Optio
 }
 
 /// Sees to it that the video `media` - `width` by `height`, read as
-/// `range` - has a scrub copy: an existing one is adopted into the reader
-/// pool at once; otherwise one is queued on the proxy lane and adopted when
-/// written. HDR files get none: the copy is eight-bit, and the light of
-/// one would change under the finger. Asking again while it is being
-/// written is free. Returns whether the file has, or will have, a copy.
+/// `range` - has a scrub copy: one written before is adopted into the reader
+/// pool at once; otherwise it is queued on the proxy lane and adopted a part
+/// at a time as it is written, so the start of the video can be read from it
+/// while the rest is still being made. HDR files get none: the copy is
+/// eight-bit, and the light of one would change under the finger. Asking
+/// again while it is being written is free. Returns whether the file has, or
+/// will have, a copy.
 pub fn ensure(
     project: &Path,
     media: &str,
@@ -100,10 +102,15 @@ pub fn ensure(
         return false;
     };
     let pool = crate::scheduler().pool();
+    // a copy written whole by an earlier build
     if target.is_file() {
         if pool.scrub_of(Path::new(media)).as_deref() != Some(target.as_path()) {
             pool.adopt_scrub(Path::new(media), target);
         }
+        return true;
+    }
+    // a copy written in parts and finished
+    if adopt_finished(pool, media, &target) {
         return true;
     }
     {
@@ -114,20 +121,17 @@ pub fn ensure(
             return true;
         }
     }
+    // what an earlier run left unfinished is not trusted: cleared, written again
+    clear_parts(&target);
     let source = media.to_owned();
     let size = size_for(width, height);
     crate::scheduler().submit(concat_media::Priority::Proxy, move || {
         let started = std::time::Instant::now();
         match write(&source, &target, size, range) {
-            Ok(frames) => {
-                crate::scheduler()
-                    .pool()
-                    .adopt_scrub(Path::new(&source), target.clone());
-                log::info!(
-                    "{source}: scrub copy of {frames} frames written in {:.1} s",
-                    started.elapsed().as_secs_f64()
-                );
-            }
+            Ok(frames) => log::info!(
+                "{source}: scrub copy of {frames} frames written in {:.1} s",
+                started.elapsed().as_secs_f64()
+            ),
             Err(error) => log::warn!("{source}: no scrub copy: {error}"),
         }
         writing()
@@ -138,16 +142,94 @@ pub fn ensure(
     true
 }
 
-/// Whether the scrub copy of `media` under `project` is queued or being
-/// written now: not yet there, and on its way.
+/// A part of the copy holds this many of its frames: ten seconds at the
+/// fifteen a second a copy keeps at most.
+const PART_SLOTS: i64 = 150;
+
+/// Where part `index` of the copy named `base` lives.
+fn part_path(base: &Path, index: i64) -> PathBuf {
+    let stem = base
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("scrub");
+    base.with_file_name(format!("{stem}-{index}.mov"))
+}
+
+/// The file whose being there says every part of the copy named `base` was
+/// written, holding the copy's frame rate and how many parts there are.
+fn marker_path(base: &Path) -> PathBuf {
+    base.with_extension("done")
+}
+
+/// The stretch of the original that part `index` covers: from the instant of
+/// its first frame to that of the next part's, or to the end of the file for
+/// the last.
+fn part_times(rate: FrameRate, index: i64, last: bool) -> (Rational, Option<Rational>) {
+    let start = rate.time_of_frame(index * PART_SLOTS);
+    let end = (!last).then(|| rate.time_of_frame((index + 1) * PART_SLOTS));
+    (start, end)
+}
+
+/// Adopts a copy written in parts that was finished, whole: false when its
+/// marker or any part is missing.
+fn adopt_finished(pool: &concat_media::ReaderPool, media: &str, base: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(marker_path(base)) else {
+        return false;
+    };
+    let numbers: Vec<i64> = text
+        .split_whitespace()
+        .filter_map(|word| word.parse().ok())
+        .collect();
+    let [num, den, count] = numbers[..] else {
+        return false;
+    };
+    if count < 1 || num < 1 || den < 1 {
+        return false;
+    }
+    let rate = FrameRate::new(Rational::new(num, den));
+    if (0..count).any(|index| !part_path(base, index).is_file()) {
+        return false;
+    }
+    for index in 0..count {
+        let (start, end) = part_times(rate, index, index == count - 1);
+        pool.adopt_scrub_part(Path::new(media), start, end, part_path(base, index));
+    }
+    true
+}
+
+/// Removes every part, partial part and marker of the copy named `base`.
+fn clear_parts(base: &Path) {
+    let Some(dir) = base.parent() else { return };
+    let Some(stem) = base.file_stem().and_then(|stem| stem.to_str()) else {
+        return;
+    };
+    let _ = std::fs::remove_file(marker_path(base));
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let prefix = format!("{stem}-");
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Whether the scrub copy of `media` under `project` is still being made
+/// and its first part is not there yet: until then a playing picture has
+/// nothing to read but the file.
 pub fn pending(project: &Path, media: &str, range: Option<ColorRange>) -> bool {
     let Some(target) = path_for(project, media, range) else {
         return false;
     };
-    writing()
+    let busy = writing()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .contains(&target)
+        .contains(&target);
+    busy && crate::scheduler()
+        .pool()
+        .scrub_part_at(Path::new(media), Rational::from_int(0))
+        .is_none()
 }
 
 /// The copies being written now, by target, so one is never queued twice
@@ -171,10 +253,15 @@ pub fn sweep(project: &Path, keep: &HashSet<PathBuf>) -> usize {
     let mut removed = 0;
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().is_some_and(|extension| extension == "mov")
-            && !keep.contains(&path)
-            && !writing.contains(&path)
-            && std::fs::remove_file(&path).is_ok()
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !(name.ends_with(".mov") || name.ends_with(".done")) {
+            continue;
+        }
+        // the copy a file belongs to: "<name>.mov" whole, or "<name>-<n>.mov",
+        // "<name>-<n>.part.mov" and "<name>.done" in parts
+        let stem = name.split(['-', '.']).next().unwrap_or_default();
+        let base = dir.join(format!("{stem}.mov"));
+        if !keep.contains(&base) && !writing.contains(&base) && std::fs::remove_file(&path).is_ok()
         {
             removed += 1;
         }
@@ -182,14 +269,16 @@ pub fn sweep(project: &Path, keep: &HashSet<PathBuf>) -> usize {
     removed
 }
 
-/// Writes the scrub copy of `source`, read as `range`, at `size` to
-/// `target`, through a temporary name moved into place only when whole.
-/// Each slot of the copy's rate takes the file's frame nearest it, so a
-/// sixty-frame file comes out at fifteen and a variable-rate one at an
-/// even pace. In software: on a phone on every core, as its pictures are too
-/// small to be given one of the chip's few decoders (see
-/// `concat_media::hardware`); elsewhere on two threads, as a proxy is, so
-/// the machine stays usable. Returns the frames written.
+/// Writes the scrub copy of `source`, read as `range`, at `size`, as parts
+/// of [`PART_SLOTS`] frames each named after `target`: every part is moved
+/// into place and adopted into the reader pool when whole, while the file is
+/// still being read, so its start can be played from the copy before the rest
+/// is written. A marker is written last. Each slot of the copy's rate takes
+/// the file's frame nearest it, so a sixty-frame file comes out at fifteen and
+/// a variable-rate one at an even pace. On a phone the file is read by the
+/// chip's decoder, the pictures being small; elsewhere in software on two
+/// threads, as a proxy is, so the machine stays usable. Returns the frames
+/// written.
 pub fn write(
     source: &str,
     target: &Path,
@@ -207,7 +296,6 @@ pub fn write(
         std::fs::create_dir_all(folder)
             .map_err(|error| format!("{}: {error}", folder.display()))?;
     }
-    let partial = target.with_extension("part.mov");
     let mut options = DecodeOptions::default()
         .scaled_to(width, height)
         .in_range(range);
@@ -215,15 +303,39 @@ pub fn write(
         options = options.in_software().threaded(2);
     }
     let mut decoder = Decoder::open(source, &options).map_err(|error| error.to_string())?;
-    let mut writer = ScrubWriter::create(&partial, width, height, copy_rate, QUALITY)
-        .map_err(|error| error.to_string())?;
-    let result = (|| {
-        let slot = copy_rate.frame_duration();
-        let half = slot / Rational::from_int(2);
-        let mut decoded: i64 = 0;
-        // where the time goes: reading the file's frames, and writing the copy's
-        let mut reading = std::time::Duration::ZERO;
-        let mut writing_time = std::time::Duration::ZERO;
+    let started = std::time::Instant::now();
+    let pool = crate::scheduler().pool();
+    let media = Path::new(source);
+    // the part being written: its writer, its index and its name until it is whole
+    let mut open: Option<(ScrubWriter, i64, PathBuf)> = None;
+    let mut parts: i64 = 0;
+    // closes the part being written, moves it into place and adopts it
+    let close = |open: &mut Option<(ScrubWriter, i64, PathBuf)>,
+                 last: bool|
+     -> Result<(), String> {
+        let Some((mut writer, index, partial)) = open.take() else {
+            return Ok(());
+        };
+        writer.finish().map_err(|error| error.to_string())?;
+        drop(writer);
+        let part = part_path(target, index);
+        std::fs::rename(&partial, &part).map_err(|error| format!("{}: {error}", part.display()))?;
+        let (start, end) = part_times(copy_rate, index, last);
+        pool.adopt_scrub_part(media, start, end, part);
+        log::info!(
+            "{source}: scrub copy part {index} ready after {:.1} s",
+            started.elapsed().as_secs_f64()
+        );
+        Ok(())
+    };
+    let slot = copy_rate.frame_duration();
+    let half = slot / Rational::from_int(2);
+    let mut decoded: i64 = 0;
+    let mut slots: i64 = 0;
+    // where the time goes: reading the file's frames, and writing the copy's
+    let mut reading = std::time::Duration::ZERO;
+    let mut writing_time = std::time::Duration::ZERO;
+    let result = (|| -> Result<(), String> {
         loop {
             let began = std::time::Instant::now();
             let next = decoder.next_frame().map_err(|error| error.to_string())?;
@@ -235,35 +347,59 @@ pub fn write(
             decoded += 1;
             // Every slot up to this frame's instant, and half a slot past
             // it, shows this frame: the nearest one to each.
-            let began = std::time::Instant::now();
-            while copy_rate.time_of_frame(writer.written() as i64) <= at + half {
-                writer
-                    .write_frame(&frame)
-                    .map_err(|error| error.to_string())?;
+            while copy_rate.time_of_frame(slots) <= at + half {
+                let index = slots / PART_SLOTS;
+                if open
+                    .as_ref()
+                    .is_some_and(|(_, current, _)| *current != index)
+                {
+                    close(&mut open, false)?;
+                }
+                if open.is_none() {
+                    let partial = part_path(target, index).with_extension("part.mov");
+                    let writer = ScrubWriter::create(&partial, width, height, copy_rate, QUALITY)
+                        .map_err(|error| error.to_string())?;
+                    open = Some((writer, index, partial));
+                    parts = index + 1;
+                }
+                let began = std::time::Instant::now();
+                if let Some((writer, _, _)) = open.as_mut() {
+                    writer
+                        .write_frame(&frame)
+                        .map_err(|error| error.to_string())?;
+                }
+                writing_time += began.elapsed();
+                slots += 1;
             }
-            writing_time += began.elapsed();
         }
-        writer.finish().map_err(|error| error.to_string())?;
-        log::info!(
-            "{source}: scrub copy: {decoded} frames read in {:.1} s ({:.1} a second), {} written in {:.1} s",
-            reading.as_secs_f64(),
-            decoded as f64 / reading.as_secs_f64().max(0.001),
-            writer.written(),
-            writing_time.as_secs_f64()
-        );
-        Ok(writer.written())
+        close(&mut open, true)
     })();
-    drop(writer);
     drop(decoder);
-    match result {
-        Ok(frames) => std::fs::rename(&partial, target)
-            .map(|()| frames)
-            .map_err(|error| format!("{}: {error}", target.display())),
-        Err(error) => {
-            let _ = std::fs::remove_file(&partial);
-            Err(error)
+    if let Err(error) = result {
+        // a part left half written is not kept; the parts that are whole stay adopted for
+        // this session, and the next run, finding no marker, writes the copy again
+        if let Some((writer, _, partial)) = open.take() {
+            drop(writer);
+            let _ = std::fs::remove_file(partial);
         }
+        return Err(error);
     }
+    if parts < 1 {
+        return Err("the file has no frames".to_owned());
+    }
+    let fps = copy_rate.fps();
+    std::fs::write(
+        marker_path(target),
+        format!("{} {} {parts}", fps.numerator(), fps.denominator()),
+    )
+    .map_err(|error| format!("{}: {error}", marker_path(target).display()))?;
+    log::info!(
+        "{source}: scrub copy: {decoded} frames read in {:.1} s ({:.1} a second), {slots} written in {:.1} s, {parts} parts",
+        reading.as_secs_f64(),
+        decoded as f64 / reading.as_secs_f64().max(0.001),
+        writing_time.as_secs_f64()
+    );
+    Ok(slots as u64)
 }
 
 #[cfg(test)]
