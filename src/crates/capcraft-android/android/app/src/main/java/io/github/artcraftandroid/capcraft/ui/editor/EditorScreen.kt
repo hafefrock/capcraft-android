@@ -333,13 +333,18 @@ fun Preview(vm: EditorViewModel, modifier: Modifier) {
         val frameH = ((shownH * cap).roundToInt() / 2 * 2).coerceAtLeast(2)
         // set while playing when the picture has stood still a while, waiting on the engine
         val stalled = remember { mutableStateOf(false) }
-        val image = rememberFrames(vm, frameW, frameH, stalled)
+        // a timeline of plain video plays straight from its file on the phone's video decoder, which the engine's
+        // pictures cannot keep up with at 1080p; a file the decoder cannot play sets this, and the engine draws
+        val directFailed = remember { mutableStateOf(false) }
+        val direct = remember(t) { directClips(t) }?.takeIf { !directFailed.value }
+        val image = rememberFrames(vm, frameW, frameH, stalled, direct != null)
         Box(
             Modifier
                 .size(with(density) { shownW.toDp() }, with(density) { shownH.toDp() })
                 .background(Color.Black),
         ) {
             image?.let { Image(it, contentDescription = null, contentScale = ContentScale.FillBounds, modifier = Modifier.fillMaxSize()) }
+            if (direct != null) DirectVideo(vm, direct, directFailed, Modifier.fillMaxSize())
             if (vm.playing && stalled.value) {
                 CircularProgressIndicator(
                     color = Color.White,
@@ -414,15 +419,18 @@ private fun rememberFrames(
     width: Int,
     height: Int,
     stalled: androidx.compose.runtime.MutableState<Boolean>,
+    direct: Boolean,
 ): ImageBitmap? {
     var image by remember { mutableStateOf<ImageBitmap?>(null) }
     val buffers = remember { FrameBuffers() }
     val meter = remember { ScrubMeter() }
     val session = vm.session
     val revision = vm.timeline?.revision
-    LaunchedEffect(session, revision, width, height, vm.playing) {
+    LaunchedEffect(session, revision, width, height, vm.playing, direct) {
         val s = session ?: return@LaunchedEffect
         stalled.value = false
+        // the picture of a plain video comes from the phone's decoder, not from here
+        if (vm.playing && direct) return@LaunchedEffect
         if (vm.playing) {
             // which frame of the timeline an instant falls in, and the instant a frame is made for: a quarter of the way
             // in, as the engine takes the frame nearest the time it is asked for, and the middle was a tie that

@@ -377,6 +377,7 @@ dependencies {
     implementation(libs.androidx.compose.foundation)
     implementation(libs.androidx.compose.material3)
     implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.androidx.media3.exoplayer)
     implementation(libs.jna) { artifact { type = "aar" } }
     testImplementation(libs.junit)
 }
