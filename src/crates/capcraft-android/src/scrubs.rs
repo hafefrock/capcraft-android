@@ -151,6 +151,14 @@ pub fn proxy_progress(session: Arc<MobileSession>) -> ProxyProgress {
         })
 }
 
+/// Holds the writing of scrub copies while a video is played straight from its
+/// file (`on`), so the phone's video decoder is the player's alone; lets it go
+/// on again when that stops.
+#[uniffi::export]
+pub fn hold_scrub_writes(on: bool) {
+    concat_host::scrub::hold(on);
+}
+
 /// Removes the copies of media no longer in the project, or read as a
 /// range they no longer are: nothing else clears them.
 pub(crate) fn sweep(session: &Session) {

@@ -142,6 +142,16 @@ pub fn ensure(
     true
 }
 
+/// While set, the writing of copies stands still between two frames: the
+/// phone's one video decoder is wanted for playing a video straight from its
+/// file, and a copy being written from the same file takes it from the player.
+static HOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Holds (or lets go) every copy being written, for as long as `on` is set.
+pub fn hold(on: bool) {
+    HOLD.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// A part of the copy holds this many of its frames: ten seconds at the
 /// fifteen a second a copy keeps at most.
 const PART_SLOTS: i64 = 150;
@@ -337,6 +347,9 @@ pub fn write(
     let mut writing_time = std::time::Duration::ZERO;
     let result = (|| -> Result<(), String> {
         loop {
+            while HOLD.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
             let began = std::time::Instant::now();
             let next = decoder.next_frame().map_err(|error| error.to_string())?;
             reading += began.elapsed();

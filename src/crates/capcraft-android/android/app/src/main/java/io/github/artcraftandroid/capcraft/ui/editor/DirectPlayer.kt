@@ -28,6 +28,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import io.github.artcraftandroid.capcraft.core.ClipView
 import io.github.artcraftandroid.capcraft.core.RowKind
 import io.github.artcraftandroid.capcraft.core.TimelineView
+import io.github.artcraftandroid.capcraft.core.holdScrubWrites
 import java.io.File
 import kotlin.math.abs
 import kotlinx.coroutines.delay
@@ -120,11 +121,13 @@ fun DirectVideo(vm: EditorViewModel, clips: List<ClipView>, failed: MutableState
         onDispose {
             player.removeListener(listener)
             player.release()
+            runCatching { holdScrubWrites(false) }
         }
     }
     LaunchedEffect(vm.playing, clips) {
         if (!vm.playing) {
             player.pause()
+            runCatching { holdScrubWrites(false) }
             return@LaunchedEffect
         }
         fun indexAt(us: Long) = clips.indexOfLast { it.startUs <= us }.coerceAtLeast(0)
@@ -134,10 +137,24 @@ fun DirectVideo(vm: EditorViewModel, clips: List<ClipView>, failed: MutableState
         player.setMediaItems(clips.map(::mediaItem), first, ((from - clips[first].startUs) / 1000).coerceAtLeast(0L))
         player.prepare()
         player.playWhenReady = true
+        // the phone has one video decoder to give: a copy of this file being written would take it from the player
+        // (the first test of this had the picture a second behind the clock, seeking again and again, while a copy was written)
+        runCatching { holdScrubWrites(true) }
         var drifts = 0
+        var ticks = 0
         try {
             while (isActive) {
                 delay(250)
+                ticks++
+                if (ticks % 8 == 0) {
+                    val at = player.currentMediaItemIndex.coerceIn(0, clips.lastIndex)
+                    Log.i(
+                        "CapCraft",
+                        "direct playing: picture at %d ms, clock at %d ms, state %d".format(
+                            (clips[at].startUs + player.currentPosition * 1000) / 1000, vm.playhead / 1000, player.playbackState,
+                        ),
+                    )
+                }
                 if (player.playbackState != Player.STATE_READY) continue
                 val index = player.currentMediaItemIndex.coerceIn(0, clips.lastIndex)
                 val shown = clips[index].startUs + player.currentPosition * 1000
@@ -155,6 +172,7 @@ fun DirectVideo(vm: EditorViewModel, clips: List<ClipView>, failed: MutableState
             }
         } finally {
             player.pause()
+            runCatching { holdScrubWrites(false) }
         }
     }
     Box(modifier.fillMaxSize(), contentAlignment = Alignment.Center) {

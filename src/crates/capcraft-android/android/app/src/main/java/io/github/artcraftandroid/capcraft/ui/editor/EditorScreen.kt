@@ -109,6 +109,8 @@ fun EditorScreen(path: String, incoming: List<Uri>, then: String? = null, close:
         val limit = SystemClock.uptimeMillis() + 5 * 60_000L
         var started = 0L
         while (isActive && SystemClock.uptimeMillis() < limit) {
+            // a timeline of plain video plays straight from its file: nothing to wait for
+            if (vm.timeline?.let { directClips(it) } != null) break
             val progress = withContext(Threads.commands) { runCatching { proxyProgress(s) }.getOrNull() } ?: break
             val pending = progress.pending.toInt()
             val total = progress.total.toInt()
